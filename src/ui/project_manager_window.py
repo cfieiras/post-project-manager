@@ -12,15 +12,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QAction, QColor
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFileDialog, QGroupBox,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow,
-    QMessageBox, QPushButton, QStatusBar, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget
+    QMenu, QMessageBox, QPushButton, QStatusBar, QTableWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget
 )
 
 from ..core.delivery_manager import DeliveryManager
+from ..core.nuke_runner import find_nuke_executable
 from ..core.shot_scanner import ShotScanner
 from .batch_render_dialog import BatchRenderDialog
 from .delivery_setup_dialog import DeliverySetupDialog
@@ -127,6 +128,8 @@ class ProjectManagerWindow(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(9, QHeaderView.ResizeToContents)
         self.table.verticalHeader().setDefaultSectionSize(46)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.show_shot_context_menu)
         main_layout.addWidget(self.table)
 
         # 3. Bottom Action Bar
@@ -478,6 +481,177 @@ class ProjectManagerWindow(QMainWindow):
             self.refresh_shots()
         else:
             QMessageBox.critical(self, "Delivery Error", msg)
+
+    def show_shot_context_menu(self, pos):
+        """Displays rich right-click context menu to open DCC scenes (Nuke, 3D, After Effects, etc.)."""
+        row = self.table.rowAt(pos.y())
+        if row < 0:
+            return
+
+        item = self.table.item(row, 2)
+        if not item:
+            return
+
+        shot = item.data(Qt.UserRole)
+        shot_dir = Path(shot.get("shot_dir", ""))
+        shot_name = shot.get("shot_name", "Shot")
+
+        menu = QMenu(self)
+
+        # Header Title
+        title_action = menu.addAction(f"🎬 Shot: {shot_name}")
+        title_action.setEnabled(False)
+        menu.addSeparator()
+
+        scenes_found = False
+
+        # 1. Nuke Scripts
+        comp_scripts_dir = shot_dir / "comp" / "scripts"
+        if comp_scripts_dir.exists():
+            nk_files = sorted(list(comp_scripts_dir.glob("*.nk")), reverse=True)
+            if nk_files:
+                scenes_found = True
+                latest_nk = nk_files[0]
+                act_latest_nk = menu.addAction(f"🟢 Open Nuke ({latest_nk.name})")
+                act_latest_nk.triggered.connect(lambda _, f=latest_nk: self.launch_file(f))
+
+                if len(nk_files) > 1:
+                    sub_nk = menu.addMenu("All Nuke Script Versions")
+                    for nk in nk_files:
+                        sub_act = sub_nk.addAction(nk.name)
+                        sub_act.triggered.connect(lambda _, f=nk: self.launch_file(f))
+
+            # After Effects Projects (.aep)
+            aep_files = sorted(list(comp_scripts_dir.glob("*.aep")), reverse=True)
+            if aep_files:
+                scenes_found = True
+                for aep in aep_files:
+                    act_aep = menu.addAction(f"🟣 Open After Effects ({aep.name})")
+                    act_aep.triggered.connect(lambda _, f=aep: self.launch_file(f))
+
+        # 2. 3D DCC Scenes (Blender, Maya, Houdini, C4D)
+        scenes_3d_dir = shot_dir / "3d" / "scenes"
+        if scenes_3d_dir.exists():
+            # Blender
+            blend_files = sorted(list(scenes_3d_dir.glob("*.blend")), reverse=True)
+            if blend_files:
+                scenes_found = True
+                act_bl = menu.addAction(f"🟠 Open Blender ({blend_files[0].name})")
+                act_bl.triggered.connect(lambda _, f=blend_files[0]: self.launch_file(f))
+
+            # Maya
+            maya_files = sorted(list(scenes_3d_dir.glob("*.ma")) + list(scenes_3d_dir.glob("*.mb")), reverse=True)
+            if maya_files:
+                scenes_found = True
+                act_my = menu.addAction(f"🔵 Open Maya ({maya_files[0].name})")
+                act_my.triggered.connect(lambda _, f=maya_files[0]: self.launch_file(f))
+
+            # Houdini
+            hip_files = sorted(list(scenes_3d_dir.glob("*.hip*")), reverse=True)
+            if hip_files:
+                scenes_found = True
+                act_hip = menu.addAction(f"🟧 Open Houdini ({hip_files[0].name})")
+                act_hip.triggered.connect(lambda _, f=hip_files[0]: self.launch_file(f))
+
+            # Cinema 4D
+            c4d_files = sorted(list(scenes_3d_dir.glob("*.c4d")), reverse=True)
+            if c4d_files:
+                scenes_found = True
+                act_c4d = menu.addAction(f"🔷 Open Cinema 4D ({c4d_files[0].name})")
+                act_c4d.triggered.connect(lambda _, f=c4d_files[0]: self.launch_file(f))
+
+        # 3. Unreal Engine Project
+        ue_dir = self.project_path / "unreal_projects"
+        if ue_dir.exists():
+            uprojects = list(ue_dir.glob("*/*.uproject"))
+            if uprojects:
+                scenes_found = True
+                act_ue = menu.addAction(f"🎮 Open Unreal Project ({uprojects[0].name})")
+                act_ue.triggered.connect(lambda _, f=uprojects[0]: self.launch_file(f))
+
+        if not scenes_found:
+            no_scenes_act = menu.addAction("(No working scene files found)")
+            no_scenes_act.setEnabled(False)
+
+        menu.addSeparator()
+
+        # 4. Review / Render Options
+        if shot.get("latest_review_path"):
+            act_play = menu.addAction(f"▶ Play Latest Review ({shot.get('latest_review_version')})")
+            act_play.triggered.connect(lambda _, s=shot: self.open_player(s))
+
+        act_r_rev = menu.addAction("🚀 Render Review MOV (Nuke)")
+        act_r_rev.triggered.connect(lambda _, s=shot: self.render_single_shot(s, "Write_REVIEW"))
+
+        act_r_hi = menu.addAction("🚀 Render Hires EXR (Nuke)")
+        act_r_hi.triggered.connect(lambda _, s=shot: self.render_single_shot(s, "Write_HIRES"))
+
+        menu.addSeparator()
+
+        # 5. Explorer Folders Submenu
+        folders_menu = menu.addMenu("📁 Open In Explorer")
+
+        act_f_shot = folders_menu.addAction("Shot Root Folder")
+        act_f_shot.triggered.connect(lambda _, p=shot_dir: self.open_folder(p))
+
+        plates_dir = shot_dir / "plates"
+        if plates_dir.exists():
+            act_f_plates = folders_menu.addAction("Plates Folder")
+            act_f_plates.triggered.connect(lambda _, p=plates_dir: self.open_folder(p))
+
+        renders_dir = shot_dir / "renders"
+        if renders_dir.exists():
+            act_f_renders = folders_menu.addAction("Renders Folder")
+            act_f_renders.triggered.connect(lambda _, p=renders_dir: self.open_folder(p))
+
+        if comp_scripts_dir.exists():
+            act_f_comp = folders_menu.addAction("Comp Scripts Folder")
+            act_f_comp.triggered.connect(lambda _, p=comp_scripts_dir: self.open_folder(p))
+
+        if scenes_3d_dir.exists():
+            act_f_3d = folders_menu.addAction("3D Scenes Folder")
+            act_f_3d.triggered.connect(lambda _, p=scenes_3d_dir: self.open_folder(p))
+
+        menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def launch_file(self, file_path: Path):
+        """Launches a DCC scene with its associated software or detected executable."""
+        if not file_path.exists():
+            QMessageBox.warning(self, "File Not Found", f"File does not exist: {file_path}")
+            return
+
+        str_path = str(file_path)
+
+        # For Nuke scripts (.nk), prefer detected Nuke executable if available
+        if file_path.suffix.lower() == ".nk":
+            nuke_exe = find_nuke_executable()
+            if nuke_exe and Path(nuke_exe).exists():
+                try:
+                    subprocess.Popen([nuke_exe, str_path])
+                    return
+                except Exception as e:
+                    print(f"Warning: Direct Nuke launch failed: {e}")
+
+        # Fallback to system OS file associations
+        try:
+            if sys.platform == "win32":
+                os.startfile(str_path)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str_path])
+            else:
+                subprocess.Popen(["xdg-open", str_path])
+        except Exception as e:
+            QMessageBox.critical(self, "Launch Error", f"Failed to open {file_path.name}:\n{e}")
+
+    def open_folder(self, folder_path: Path):
+        """Opens folder in system explorer."""
+        if folder_path.exists():
+            if sys.platform == "win32":
+                os.startfile(str(folder_path))
+            elif sys.platform == "darwin":
+                subprocess.run(["open", str(folder_path)])
+            else:
+                subprocess.run(["xdg-open", str(folder_path)])
 
     def open_selected_shot_folder(self):
         curr_row = self.table.currentRow()
