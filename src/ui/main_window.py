@@ -21,6 +21,7 @@ from ..core.pipeline import PipelineManager
 from ..version import __version__, __app_name__
 from .create_dialog import ProjectDialog
 from .template_dialog import TemplateDialog
+from .project_manager_window import ProjectManagerWindow
 
 
 def get_config_file() -> Path:
@@ -92,12 +93,16 @@ class MainWindow(QMainWindow):
 
         actions_bar.addSpacing(15)
 
+        self.btn_studio_mgr = QPushButton("🎬 Open Project Manager")
+        self.btn_studio_mgr.setObjectName("primaryButton")
+        self.btn_studio_mgr.clicked.connect(self.open_studio_manager)
+        actions_bar.addWidget(self.btn_studio_mgr)
+
         btn_new = QPushButton("+ New Project")
-        btn_new.setObjectName("primaryButton")
         btn_new.clicked.connect(self.open_create_dialog)
         actions_bar.addWidget(btn_new)
 
-        self.btn_edit = QPushButton("✎ Modify Project")
+        self.btn_edit = QPushButton("✎ Modify Structure")
         self.btn_edit.clicked.connect(self.open_edit_dialog)
         actions_bar.addWidget(self.btn_edit)
 
@@ -129,7 +134,7 @@ class MainWindow(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
-        self.table.itemDoubleClicked.connect(self.open_selected_in_explorer)
+        self.table.itemDoubleClicked.connect(self.on_table_double_clicked)
         main_layout.addWidget(self.table)
 
         # 4. Status Bar
@@ -252,7 +257,36 @@ class MainWindow(QMainWindow):
         dialog.project_created.connect(lambda: self.refresh_projects())
         dialog.exec()
 
-    def open_edit_dialog(self):
+    def on_table_double_clicked(self, item: QTableWidgetItem):
+        proj = self.get_selected_project()
+        if not proj:
+            return
+        if proj.get("is_registered"):
+            self.open_studio_manager()
+        else:
+            self.open_selected_in_explorer()
+
+    def open_studio_manager(self):
+        proj = self.get_selected_project()
+        if not proj:
+            QMessageBox.information(self, "Selection Required", "Please select a registered project first.")
+            return
+
+        if not proj.get("is_registered"):
+            reply = QMessageBox.question(
+                self,
+                "Unregistered Project",
+                f"Project '{proj['name']}' has not been initialized with pipeline metadata.\n"
+                "Would you like to configure and register it now?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                self.open_edit_dialog()
+            return
+
+        proj_path = Path(proj["path"])
+        mgr_win = ProjectManagerWindow(proj_path, parent=self)
+        mgr_win.show()
         proj = self.get_selected_project()
         if not proj:
             QMessageBox.information(self, "Selection", "Please select a project to modify.")
