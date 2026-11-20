@@ -6,6 +6,9 @@ on:
       - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -33,19 +36,12 @@ jobs:
             --clean `
             src/main.py
 
-      - name: Package Portable ZIP
-        run: |
-          mkdir release_package
-          cp dist/PostProjectManager.exe release_package/
-          cp -r templates release_package/
-          cp README.md release_package/
-          Compress-Archive -Path release_package/* -DestinationPath PostProjectManager_portable_windows.zip
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: PostProjectManager_portable_windows.zip
+          name: "Post Project Manager ${{ github.ref_name }}"
+          files: dist/PostProjectManager.exe
           draft: false
           prerelease: false
           generate_release_notes: true

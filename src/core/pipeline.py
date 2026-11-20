@@ -6,6 +6,7 @@ metadata synchronization, and non-destructive project updates.
 
 import json
 import shutil
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -13,12 +14,29 @@ from typing import Any, Dict, List, Optional, Tuple
 from .nuke_generator import generate_nuke_script
 
 
-DEFAULT_TEMPLATE_PATH = Path(__file__).resolve().parent.parent.parent / "templates" / "default_template.json"
+def get_base_dir() -> Path:
+    """Returns the application base directory, handling PyInstaller single-exe packaging."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent.parent
+
+
+def get_default_template_path() -> Path:
+    """Finds the template file from local disk, PyInstaller bundle, or defaults."""
+    base = get_base_dir()
+    local_file = base / "templates" / "default_template.json"
+    if local_file.exists():
+        return local_file
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        bundled = Path(sys._MEIPASS) / "templates" / "default_template.json"
+        if bundled.exists():
+            return bundled
+    return local_file
 
 
 class PipelineManager:
     def __init__(self, template_path: Optional[Path] = None):
-        self.template_path = Path(template_path) if template_path else DEFAULT_TEMPLATE_PATH
+        self.template_path = Path(template_path) if template_path else get_default_template_path()
         self.template = self.load_template()
 
     def load_template(self) -> Dict[str, Any]:

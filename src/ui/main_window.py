@@ -22,7 +22,13 @@ from .create_dialog import ProjectDialog
 from .template_dialog import TemplateDialog
 
 
-CONFIG_FILE = Path(__file__).resolve().parent.parent.parent / "config.json"
+def get_config_file() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / "config.json"
+    return Path(__file__).resolve().parent.parent.parent / "config.json"
+
+
+CONFIG_FILE = get_config_file()
 
 
 class MainWindow(QMainWindow):
