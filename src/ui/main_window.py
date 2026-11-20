@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.pipeline import PipelineManager
+from ..version import __version__, __app_name__
 from .create_dialog import ProjectDialog
 from .template_dialog import TemplateDialog
 
@@ -34,7 +35,7 @@ CONFIG_FILE = get_config_file()
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Post Project Manager - v1.0.0")
+        self.setWindowTitle(f"{__app_name__} - v{__version__}")
         self.resize(1050, 650)
         self.setMinimumSize(850, 500)
 

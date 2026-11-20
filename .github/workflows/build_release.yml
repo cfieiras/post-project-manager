@@ -29,9 +29,14 @@ jobs:
           pip install -r requirements.txt
 
       - name: Build Standalone Executable with PyInstaller
+        shell: pwsh
         run: |
+          $ver = "${{ github.ref_name }}"
+          if (-not $ver) { $ver = "v1.0.3" }
+          $exe_name = "PostProjectManager_$ver"
+          Write-Host "Building executable: $exe_name.exe"
           pyinstaller --noconsole --onefile `
-            --name "PostProjectManager" `
+            --name "$exe_name" `
             --add-data "templates/default_template.json;templates" `
             --clean `
             src/main.py
@@ -41,7 +46,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         with:
           name: "Post Project Manager ${{ github.ref_name }}"
-          files: dist/PostProjectManager.exe
+          files: dist/*.exe
           draft: false
           prerelease: false
           generate_release_notes: true
