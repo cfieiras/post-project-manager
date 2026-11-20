@@ -1,7 +1,7 @@
 """
 Studio Project Manager Window (ShotGrid-Lite).
-Central production hub for tracking shot statuses, version synchronization,
-in-app video reviews, headless batch rendering, and structured client deliveries.
+Next-generation production hub with visual thumbnails, DCC quick-launch badges,
+modern status pills, smart filter chips, one-click outdated render, and keyboard shortcuts.
 """
 
 import json
@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QColor
+from PySide6.QtGui import QAction, QColor, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QFileDialog, QGroupBox,
+    QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QGroupBox,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow,
     QMenu, QMessageBox, QPushButton, QStatusBar, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget
@@ -23,18 +23,19 @@ from PySide6.QtWidgets import (
 from ..core.delivery_manager import DeliveryManager
 from ..core.nuke_runner import find_nuke_executable
 from ..core.shot_scanner import ShotScanner
+from ..core.thumbnail_generator import ThumbnailManager
 from .batch_render_dialog import BatchRenderDialog
 from .delivery_setup_dialog import DeliverySetupDialog
 from .player_dialog import ReviewPlayerDialog
 
 
-STATUS_COLORS = {
-    "Not Started": "#757575",
-    "In Progress": "#0288d1",
-    "Pending Review": "#f57c00",
-    "Approved": "#388e3c",
-    "Delivered": "#7b1fa2",
-    "On Hold": "#d32f2f"
+STATUS_STYLES = {
+    "Approved": "background-color: #2e7d32; color: #ffffff; border-radius: 11px; font-weight: bold; padding: 2px 10px;",
+    "In Progress": "background-color: #1565c0; color: #ffffff; border-radius: 11px; font-weight: bold; padding: 2px 10px;",
+    "Pending Review": "background-color: #e65100; color: #ffffff; border-radius: 11px; font-weight: bold; padding: 2px 10px;",
+    "Delivered": "background-color: #6a1b9a; color: #ffffff; border-radius: 11px; font-weight: bold; padding: 2px 10px;",
+    "On Hold": "background-color: #c62828; color: #ffffff; border-radius: 11px; font-weight: bold; padding: 2px 10px;",
+    "Not Started": "background-color: #424242; color: #b0b0b8; border-radius: 11px; font-weight: bold; padding: 2px 10px;"
 }
 
 
@@ -48,12 +49,15 @@ class ProjectManagerWindow(QMainWindow):
         self.meta = self.load_json(self.meta_file)
         self.shot_data = self.load_json(self.shot_data_file)
         self.scanned_shots: List[Dict[str, Any]] = []
+        self.active_status_filter = "All"
+        self.all_selected_state = False
 
         self.setWindowTitle(f"Project Manager - {self.project_path.name}")
-        self.resize(1280, 750)
-        self.setMinimumSize(1000, 600)
+        self.resize(1340, 780)
+        self.setMinimumSize(1050, 640)
 
         self.init_ui()
+        self.setup_shortcuts()
         self.refresh_shots()
 
         # Check delivery folder setup after window is displayed
@@ -63,13 +67,12 @@ class ProjectManagerWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
-        main_layout.setSpacing(10)
-        main_layout.setContentsMargins(14, 14, 14, 14)
+        main_layout.setSpacing(8)
+        main_layout.setContentsMargins(14, 12, 14, 12)
 
         # 1. Top Metadata & Sequence Filter Bar
         top_bar = QHBoxLayout()
 
-        # Project Info
         settings = self.meta.get("project_settings", {})
         fps = settings.get("fps", 24.0)
         res = settings.get("resolution", "1920x1080")
@@ -83,8 +86,7 @@ class ProjectManagerWindow(QMainWindow):
 
         top_bar.addStretch()
 
-        # Sequence Filter
-        top_bar.addWidget(QLabel("<b>Filter Sequence:</b>"))
+        top_bar.addWidget(QLabel("<b>Sequence:</b>"))
         self.seq_filter_combo = QComboBox()
         self.seq_filter_combo.addItem("All Sequences")
         for seq_name in self.meta.get("sequences", {}).keys():
@@ -92,7 +94,6 @@ class ProjectManagerWindow(QMainWindow):
         self.seq_filter_combo.currentTextChanged.connect(self.apply_filter)
         top_bar.addWidget(self.seq_filter_combo)
 
-        # Delivery settings button
         self.btn_delivery_settings = QPushButton("⚙ Delivery Settings")
         self.btn_delivery_settings.clicked.connect(self.open_delivery_setup)
         top_bar.addWidget(self.btn_delivery_settings)
@@ -103,17 +104,54 @@ class ProjectManagerWindow(QMainWindow):
 
         main_layout.addLayout(top_bar)
 
-        # Delivery path indicator badge
-        self.delivery_lbl = QLabel("Delivery Folder: Not Configured")
+        # 2. Smart Filters Bar (Search + Status Chips)
+        filter_bar = QHBoxLayout()
+        filter_bar.setSpacing(8)
+
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("🔍 Search shots or notes...")
+        self.search_input.setMaximumWidth(280)
+        self.search_input.textChanged.connect(self.apply_filter)
+        filter_bar.addWidget(self.search_input)
+
+        filter_bar.addWidget(QLabel("<b>Filter:</b>"))
+
+        self.chip_group = QButtonGroup(self)
+        self.chip_buttons: Dict[str, QPushButton] = {}
+
+        chips = [
+            ("All", "All"),
+            ("Outdated", "⚠️ Outdated"),
+            ("Pending Review", "🟠 Pending"),
+            ("Approved", "🟢 Approved"),
+            ("Delivered", "🟣 Delivered"),
+            ("In Progress", "🔵 In Progress")
+        ]
+
+        for key, label in chips:
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            if key == "All":
+                btn.setChecked(True)
+            btn.clicked.connect(lambda _, k=key: self.set_status_filter(k))
+            self.chip_group.addButton(btn)
+            self.chip_buttons[key] = btn
+            filter_bar.addWidget(btn)
+
+        filter_bar.addStretch()
+
+        self.delivery_lbl = QLabel("Delivery: Not Configured")
         self.delivery_lbl.setStyleSheet("color: #b0b0b8; font-size: 11px;")
         self.update_delivery_label()
-        main_layout.addWidget(self.delivery_lbl)
+        filter_bar.addWidget(self.delivery_lbl)
 
-        # 2. Main ShotGrid-Lite Table
+        main_layout.addLayout(filter_bar)
+
+        # 3. Main ShotGrid-Lite Table
         self.table = QTableWidget()
         self.table.setColumnCount(10)
         self.table.setHorizontalHeaderLabels([
-            "Select", "Thumbnail", "Shot ID", "Status", "Notes & Supervisor Feedback",
+            "Select", "Thumbnail", "Shot & Scenes", "Status", "Notes & Supervisor Feedback",
             "Latest Review", "Hires Status", "Comp Sync", "Render Action", "Delivery"
         ])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
@@ -126,14 +164,27 @@ class ProjectManagerWindow(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(8, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(9, QHeaderView.ResizeToContents)
-        self.table.verticalHeader().setDefaultSectionSize(46)
+        self.table.verticalHeader().setDefaultSectionSize(76)
+        self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.show_shot_context_menu)
+        self.table.horizontalHeader().sectionClicked.connect(self.on_header_clicked)
         main_layout.addWidget(self.table)
 
-        # 3. Bottom Action Bar
+        # 4. Bottom Action Bar
         bottom_bar = QHBoxLayout()
+
+        self.btn_select_all = QPushButton("☑ Select All")
+        self.btn_select_all.clicked.connect(self.toggle_select_all)
+        bottom_bar.addWidget(self.btn_select_all)
+
+        self.btn_render_outdated = QPushButton("⚡ Render Outdated (0)")
+        self.btn_render_outdated.setStyleSheet(
+            "background-color: #ff9800; color: #101010; font-weight: bold; border-radius: 4px; padding: 6px 14px;"
+        )
+        self.btn_render_outdated.clicked.connect(self.on_render_outdated_clicked)
+        bottom_bar.addWidget(self.btn_render_outdated)
 
         btn_batch_render = QPushButton("🚀 Batch Render Selected")
         btn_batch_render.setObjectName("primaryButton")
@@ -144,7 +195,7 @@ class ProjectManagerWindow(QMainWindow):
         btn_deliver.clicked.connect(self.on_execute_delivery)
         bottom_bar.addWidget(btn_deliver)
 
-        bottom_bar.addSpacing(20)
+        bottom_bar.addSpacing(15)
 
         btn_open_shot = QPushButton("📁 Open Shot Folder")
         btn_open_shot.clicked.connect(self.open_selected_shot_folder)
@@ -156,11 +207,58 @@ class ProjectManagerWindow(QMainWindow):
 
         bottom_bar.addStretch()
 
+        # Keyboard tips hint
+        hint_lbl = QLabel("<span style='color: #70707a;'>Shortcuts: [Space] Play Review &nbsp;|&nbsp; [Enter] Launch Nuke</span>")
+        bottom_bar.addWidget(hint_lbl)
+
         main_layout.addLayout(bottom_bar)
 
-        # 4. Status Bar
+        # 5. Status Bar
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
+
+    def setup_shortcuts(self):
+        # Spacebar to play review of currently selected shot
+        space_sc = QShortcut(QKeySequence(Qt.Key_Space), self.table)
+        space_sc.activated.connect(self.on_space_pressed)
+
+        # Enter to launch Nuke script of currently selected shot
+        enter_sc = QShortcut(QKeySequence(Qt.Key_Return), self.table)
+        enter_sc.activated.connect(self.on_enter_pressed)
+
+    def on_space_pressed(self):
+        curr_row = self.table.currentRow()
+        if curr_row >= 0:
+            item = self.table.item(curr_row, 2)
+            if item:
+                shot = item.data(Qt.UserRole)
+                if shot and shot.get("latest_review_path"):
+                    self.open_player(shot)
+
+    def on_enter_pressed(self):
+        curr_row = self.table.currentRow()
+        if curr_row >= 0:
+            item = self.table.item(curr_row, 2)
+            if item:
+                shot = item.data(Qt.UserRole)
+                if shot and shot.get("latest_script_path"):
+                    self.launch_file(Path(shot["latest_script_path"]))
+
+    def on_header_clicked(self, logical_index: int):
+        if logical_index == 0:
+            self.toggle_select_all()
+
+    def toggle_select_all(self):
+        self.all_selected_state = not self.all_selected_state
+        for row in range(self.table.rowCount()):
+            cb = self.table.cellWidget(row, 0)
+            if cb:
+                cb.setChecked(self.all_selected_state)
+        self.btn_select_all.setText("☐ Deselect All" if self.all_selected_state else "☑ Select All")
+
+    def set_status_filter(self, filter_key: str):
+        self.active_status_filter = filter_key
+        self.apply_filter()
 
     def load_json(self, path: Path) -> Dict[str, Any]:
         if path.exists():
@@ -181,14 +279,14 @@ class ProjectManagerWindow(QMainWindow):
     def update_delivery_label(self):
         deliv = self.meta.get("delivery_dir")
         if deliv and Path(deliv).exists():
-            self.delivery_lbl.setText(f"📁 <b>Delivery Folder:</b> <span style='color: #4caf50;'>{deliv}</span>")
+            self.delivery_lbl.setText(f"📁 <b>Delivery:</b> <span style='color: #4caf50;'>{Path(deliv).name}</span>")
+            self.delivery_lbl.setToolTip(deliv)
         else:
-            self.delivery_lbl.setText("📁 <b>Delivery Folder:</b> <span style='color: #ff9800;'>Not Configured (Click Delivery Settings to setup)</span>")
+            self.delivery_lbl.setText("📁 <b>Delivery:</b> <span style='color: #ff9800;'>Not Set</span>")
 
     def check_initial_delivery_setup(self):
         deliv = self.meta.get("delivery_dir")
         if not deliv or not Path(deliv).exists():
-            # Prompt user to setup delivery folder
             dialog = DeliverySetupDialog(
                 current_path=None,
                 sequences=self.meta.get("sequences", {}),
@@ -217,17 +315,60 @@ class ProjectManagerWindow(QMainWindow):
     def refresh_shots(self):
         sequences = self.meta.get("sequences", {})
         self.scanned_shots = ShotScanner.scan_all_shots(self.project_path, sequences)
+
+        # Update outdated button count
+        outdated_count = sum(1 for s in self.scanned_shots if s.get("is_outdated"))
+        self.btn_render_outdated.setText(f"⚡ Render Outdated ({outdated_count})")
+        self.btn_render_outdated.setEnabled(outdated_count > 0)
+
+        # Update chip counts
+        for key, btn in self.chip_buttons.items():
+            if key == "All":
+                btn.setText(f"All ({len(self.scanned_shots)})")
+            elif key == "Outdated":
+                btn.setText(f"⚠️ Outdated ({outdated_count})")
+            else:
+                count = sum(1 for s in self.scanned_shots if self.shot_data.get(f"{s['seq_name']}_{s['shot_name']}", {}).get("status") == key)
+                short_name = key.split()[0]
+                btn.setText(f"{short_name} ({count})")
+
         self.apply_filter()
 
     def apply_filter(self):
         selected_seq = self.seq_filter_combo.currentText()
-        filtered = [
-            s for s in self.scanned_shots
-            if selected_seq == "All Sequences" or s["seq_name"] == selected_seq
-        ]
+        query = self.search_input.text().strip().lower()
 
-        self.table.setRowCount(len(filtered))
-        for row, shot in enumerate(filtered):
+        filtered = []
+        for s in self.scanned_shots:
+            shot_key = f"{s['seq_name']}_{s['shot_name']}"
+            saved_info = self.shot_data.get(shot_key, {})
+            status = saved_info.get("status", "Not Started")
+            notes = saved_info.get("notes", "").lower()
+
+            # Sequence match
+            if selected_seq != "All Sequences" and s["seq_name"] != selected_seq:
+                continue
+
+            # Search match
+            if query and (query not in s["shot_name"].lower() and query not in notes):
+                continue
+
+            # Status Chip filter
+            if self.active_status_filter == "Outdated":
+                if not s.get("is_outdated"):
+                    continue
+            elif self.active_status_filter != "All":
+                if status != self.active_status_filter:
+                    continue
+
+            filtered.append(s)
+
+        self.populate_table(filtered)
+
+    def populate_table(self, shots: List[Dict[str, Any]]):
+        self.table.setRowCount(len(shots))
+
+        for row, shot in enumerate(shots):
             shot_key = f"{shot['seq_name']}_{shot['shot_name']}"
             saved_info = self.shot_data.get(shot_key, {})
 
@@ -236,29 +377,52 @@ class ProjectManagerWindow(QMainWindow):
             cb_item.setStyleSheet("margin-left: 8px;")
             self.table.setCellWidget(row, 0, cb_item)
 
-            # 1. Thumbnail / Play Button
-            btn_thumb = QPushButton("▶ Play" if shot.get("latest_review_path") else "No Video")
-            btn_thumb.setEnabled(bool(shot.get("latest_review_path")))
+            # 1. Visual Poster Thumbnail
+            thumb_pixmap = ThumbnailManager.get_thumbnail(self.project_path, shot, width=120, height=68)
+            thumb_btn = QPushButton()
+            thumb_btn.setFixedSize(120, 68)
+            thumb_btn.setIcon(thumb_pixmap)
+            thumb_btn.setIconSize(thumb_pixmap.size())
+            thumb_btn.setStyleSheet("border: 1px solid #2e2e38; border-radius: 4px; background: transparent; padding: 0;")
+            thumb_btn.setToolTip("Click to play review in integrated player" if shot.get("latest_review_path") else "No review video yet")
             if shot.get("latest_review_path"):
-                btn_thumb.clicked.connect(lambda _, s=shot: self.open_player(s))
-            self.table.setCellWidget(row, 1, btn_thumb)
+                thumb_btn.clicked.connect(lambda _, s=shot: self.open_player(s))
+            self.table.setCellWidget(row, 1, thumb_btn)
 
-            # 2. Shot ID
-            item_shot = QTableWidgetItem(shot["shot_name"])
+            # 2. Shot ID & DCC Quick-Launch Badges
+            shot_widget = QWidget()
+            sw_layout = QVBoxLayout(shot_widget)
+            sw_layout.setContentsMargins(6, 4, 6, 4)
+            sw_layout.setSpacing(4)
+
+            shot_name_lbl = QLabel(f"<b>{shot['shot_name']}</b>")
+            shot_name_lbl.setStyleSheet("font-size: 13px; color: #ffffff;")
+            sw_layout.addWidget(shot_name_lbl)
+
+            # DCC Badges Row
+            badges_layout = QHBoxLayout()
+            badges_layout.setSpacing(4)
+
+            shot_dir = Path(shot.get("shot_dir", ""))
+            self.add_dcc_badges(shot_dir, badges_layout)
+            sw_layout.addLayout(badges_layout)
+
+            # Store shot data in hidden item
+            item_shot = QTableWidgetItem("")
             item_shot.setData(Qt.UserRole, shot)
-            item_shot.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(row, 2, item_shot)
+            self.table.setCellWidget(row, 2, shot_widget)
 
-            # 3. Status Dropdown
+            # 3. Status Pill Dropdown
             status_combo = QComboBox()
-            for st, col in STATUS_COLORS.items():
+            for st in STATUS_STYLES.keys():
                 status_combo.addItem(st)
 
             current_status = saved_info.get("status", "Not Started")
             idx = status_combo.findText(current_status)
             if idx >= 0:
                 status_combo.setCurrentIndex(idx)
-            self.apply_combo_color(status_combo, current_status)
+            self.apply_status_pill_style(status_combo, current_status)
             status_combo.currentTextChanged.connect(
                 lambda val, k=shot_key, sc=status_combo: self.on_status_changed(k, val, sc)
             )
@@ -266,7 +430,7 @@ class ProjectManagerWindow(QMainWindow):
 
             # 4. Notes LineEdit
             notes_edit = QLineEdit(saved_info.get("notes", ""))
-            notes_edit.setPlaceholderText("Add notes...")
+            notes_edit.setPlaceholderText("Add supervisor or artist notes...")
             notes_edit.editingFinished.connect(
                 lambda k=shot_key, ne=notes_edit: self.on_notes_changed(k, ne.text())
             )
@@ -329,7 +493,6 @@ class ProjectManagerWindow(QMainWindow):
             cb_deliver.setChecked(saved_info.get("marked_for_delivery", False))
 
             combo_deliv_ver = QComboBox()
-            # Combine available versions
             all_vers = sorted(list(set(
                 list(shot.get("all_review_versions", {}).keys()) +
                 shot.get("all_hires_versions", [])
@@ -354,14 +517,88 @@ class ProjectManagerWindow(QMainWindow):
             dw_layout.addWidget(combo_deliv_ver)
             self.table.setCellWidget(row, 9, deliv_widget)
 
-        self.status_bar.showMessage(f"Loaded {len(filtered)} shots.")
+        self.status_bar.showMessage(f"Displaying {len(shots)} of {len(self.scanned_shots)} shots.")
 
-    def apply_combo_color(self, combo: QComboBox, status: str):
-        col = STATUS_COLORS.get(status, "#757575")
-        combo.setStyleSheet(f"color: {col}; font-weight: bold;")
+    def add_dcc_badges(self, shot_dir: Path, layout: QHBoxLayout):
+        """Adds compact, clickable quick-launch badges for detected DCC files."""
+        # 1. Nuke
+        comp_scripts_dir = shot_dir / "comp" / "scripts"
+        if comp_scripts_dir.exists():
+            nk_files = sorted(list(comp_scripts_dir.glob("*.nk")), reverse=True)
+            if nk_files:
+                btn_nk = QPushButton("NK")
+                btn_nk.setToolTip(f"Open Nuke: {nk_files[0].name}")
+                btn_nk.setStyleSheet("background-color: #e65100; color: #ffffff; font-size: 9px; font-weight: bold; padding: 1px 5px; border-radius: 3px;")
+                btn_nk.clicked.connect(lambda _, f=nk_files[0]: self.launch_file(f))
+                layout.addWidget(btn_nk)
+
+            # After Effects
+            aep_files = sorted(list(comp_scripts_dir.glob("*.aep")), reverse=True)
+            if aep_files:
+                btn_ae = QPushButton("AE")
+                btn_ae.setToolTip(f"Open After Effects: {aep_files[0].name}")
+                btn_ae.setStyleSheet("background-color: #7b1fa2; color: #ffffff; font-size: 9px; font-weight: bold; padding: 1px 5px; border-radius: 3px;")
+                btn_ae.clicked.connect(lambda _, f=aep_files[0]: self.launch_file(f))
+                layout.addWidget(btn_ae)
+
+        # 2. 3D DCC Scenes
+        scenes_3d_dir = shot_dir / "3d" / "scenes"
+        if scenes_3d_dir.exists():
+            # Blender
+            blend_files = sorted(list(scenes_3d_dir.glob("*.blend")), reverse=True)
+            if blend_files:
+                btn_bl = QPushButton("BL")
+                btn_bl.setToolTip(f"Open Blender: {blend_files[0].name}")
+                btn_bl.setStyleSheet("background-color: #f57c00; color: #ffffff; font-size: 9px; font-weight: bold; padding: 1px 5px; border-radius: 3px;")
+                btn_bl.clicked.connect(lambda _, f=blend_files[0]: self.launch_file(f))
+                layout.addWidget(btn_bl)
+
+            # Maya
+            maya_files = sorted(list(scenes_3d_dir.glob("*.ma")) + list(scenes_3d_dir.glob("*.mb")), reverse=True)
+            if maya_files:
+                btn_my = QPushButton("MY")
+                btn_my.setToolTip(f"Open Maya: {maya_files[0].name}")
+                btn_my.setStyleSheet("background-color: #0097a7; color: #ffffff; font-size: 9px; font-weight: bold; padding: 1px 5px; border-radius: 3px;")
+                btn_my.clicked.connect(lambda _, f=maya_files[0]: self.launch_file(f))
+                layout.addWidget(btn_my)
+
+            # Houdini
+            hip_files = sorted(list(scenes_3d_dir.glob("*.hip*")), reverse=True)
+            if hip_files:
+                btn_hd = QPushButton("HD")
+                btn_hd.setToolTip(f"Open Houdini: {hip_files[0].name}")
+                btn_hd.setStyleSheet("background-color: #d84315; color: #ffffff; font-size: 9px; font-weight: bold; padding: 1px 5px; border-radius: 3px;")
+                btn_hd.clicked.connect(lambda _, f=hip_files[0]: self.launch_file(f))
+                layout.addWidget(btn_hd)
+
+            # Cinema 4D
+            c4d_files = sorted(list(scenes_3d_dir.glob("*.c4d")), reverse=True)
+            if c4d_files:
+                btn_c4d = QPushButton("C4D")
+                btn_c4d.setToolTip(f"Open Cinema 4D: {c4d_files[0].name}")
+                btn_c4d.setStyleSheet("background-color: #1976d2; color: #ffffff; font-size: 9px; font-weight: bold; padding: 1px 5px; border-radius: 3px;")
+                btn_c4d.clicked.connect(lambda _, f=c4d_files[0]: self.launch_file(f))
+                layout.addWidget(btn_c4d)
+
+        # 3. Unreal Engine
+        ue_dir = self.project_path / "unreal_projects"
+        if ue_dir.exists():
+            uprojects = list(ue_dir.glob("*/*.uproject"))
+            if uprojects:
+                btn_ue = QPushButton("UE")
+                btn_ue.setToolTip(f"Open Unreal Engine: {uprojects[0].name}")
+                btn_ue.setStyleSheet("background-color: #0288d1; color: #ffffff; font-size: 9px; font-weight: bold; padding: 1px 5px; border-radius: 3px;")
+                btn_ue.clicked.connect(lambda _, f=uprojects[0]: self.launch_file(f))
+                layout.addWidget(btn_ue)
+
+        layout.addStretch()
+
+    def apply_status_pill_style(self, combo: QComboBox, status: str):
+        style = STATUS_STYLES.get(status, STATUS_STYLES["Not Started"])
+        combo.setStyleSheet(style)
 
     def on_status_changed(self, shot_key: str, status: str, combo: QComboBox):
-        self.apply_combo_color(combo, status)
+        self.apply_status_pill_style(combo, status)
         if shot_key not in self.shot_data:
             self.shot_data[shot_key] = {}
         self.shot_data[shot_key]["status"] = status
@@ -405,6 +642,16 @@ class ProjectManagerWindow(QMainWindow):
                     selected.append(item.data(Qt.UserRole))
         return selected
 
+    def on_render_outdated_clicked(self):
+        outdated_shots = [s for s in self.scanned_shots if s.get("is_outdated")]
+        if not outdated_shots:
+            QMessageBox.information(self, "Up to Date", "All shots are currently up to date!")
+            return
+
+        dialog = BatchRenderDialog(outdated_shots, parent=self)
+        dialog.exec()
+        self.refresh_shots()
+
     def on_batch_render(self):
         selected = self.get_selected_shots()
         if not selected:
@@ -437,7 +684,6 @@ class ProjectManagerWindow(QMainWindow):
 
         delivery_root = Path(deliv_dir_str)
 
-        # Collect all shots marked for delivery
         to_deliver = []
         for shot in self.scanned_shots:
             shot_key = f"{shot['seq_name']}_{shot['shot_name']}"
@@ -472,7 +718,6 @@ class ProjectManagerWindow(QMainWindow):
 
         if success:
             QMessageBox.information(self, "Delivery Complete", f"{msg}\n\nDestination:\n{delivery_root}")
-            # Update status to Delivered
             for item in to_deliver:
                 k = f"{item['seq_name']}_{item['shot_name']}"
                 if k in self.shot_data:
@@ -498,7 +743,6 @@ class ProjectManagerWindow(QMainWindow):
 
         menu = QMenu(self)
 
-        # Header Title
         title_action = menu.addAction(f"🎬 Shot: {shot_name}")
         title_action.setEnabled(False)
         menu.addSeparator()
@@ -532,28 +776,24 @@ class ProjectManagerWindow(QMainWindow):
         # 2. 3D DCC Scenes (Blender, Maya, Houdini, C4D)
         scenes_3d_dir = shot_dir / "3d" / "scenes"
         if scenes_3d_dir.exists():
-            # Blender
             blend_files = sorted(list(scenes_3d_dir.glob("*.blend")), reverse=True)
             if blend_files:
                 scenes_found = True
                 act_bl = menu.addAction(f"🟠 Open Blender ({blend_files[0].name})")
                 act_bl.triggered.connect(lambda _, f=blend_files[0]: self.launch_file(f))
 
-            # Maya
             maya_files = sorted(list(scenes_3d_dir.glob("*.ma")) + list(scenes_3d_dir.glob("*.mb")), reverse=True)
             if maya_files:
                 scenes_found = True
                 act_my = menu.addAction(f"🔵 Open Maya ({maya_files[0].name})")
                 act_my.triggered.connect(lambda _, f=maya_files[0]: self.launch_file(f))
 
-            # Houdini
             hip_files = sorted(list(scenes_3d_dir.glob("*.hip*")), reverse=True)
             if hip_files:
                 scenes_found = True
                 act_hip = menu.addAction(f"🟧 Open Houdini ({hip_files[0].name})")
                 act_hip.triggered.connect(lambda _, f=hip_files[0]: self.launch_file(f))
 
-            # Cinema 4D
             c4d_files = sorted(list(scenes_3d_dir.glob("*.c4d")), reverse=True)
             if c4d_files:
                 scenes_found = True
