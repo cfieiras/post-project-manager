@@ -1,0 +1,53 @@
+name: Build Portable Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build Standalone Executable with PyInstaller
+        run: |
+          pyinstaller --noconsole --onefile `
+            --name "PostProjectManager" `
+            --add-data "templates/default_template.json;templates" `
+            --clean `
+            src/main.py
+
+      - name: Package Portable ZIP
+        run: |
+          mkdir release_package
+          cp dist/PostProjectManager.exe release_package/
+          cp -r templates release_package/
+          cp README.md release_package/
+          Compress-Archive -Path release_package/* -DestinationPath PostProjectManager_portable_windows.zip
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: PostProjectManager_portable_windows.zip
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

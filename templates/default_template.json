@@ -1,0 +1,91 @@
+{
+  "version": "1.0.0",
+  "project_settings_default": {
+    "fps": 24.0,
+    "resolution": "1920x1080",
+    "resolution_name": "HD_1080",
+    "color_management": "OCIO",
+    "ocio_config": "aces_1.2",
+    "working_space": "ACES - ACEScg",
+    "frame_start": 1001,
+    "frame_end": 1100
+  },
+  "core_folders": [
+    "incoming",
+    "editorial/project_files",
+    "editorial/conforms",
+    "editorial/offline_refs",
+    "editorial/audio",
+    "assets/color",
+    "assets/fonts",
+    "assets/graphics",
+    "assets/references"
+  ],
+  "shot_core": [
+    "plates/v001/proxies",
+    "renders/hires/v001",
+    "renders/review"
+  ],
+  "modules": {
+    "comp": {
+      "id": "comp",
+      "name": "Compositing",
+      "description": "Nuke / AE / Fusion scripts and intermediate precomps",
+      "enabled_by_default": true,
+      "root_folders": [],
+      "shot_folders": [
+        "comp/scripts",
+        "comp/precomps"
+      ],
+      "generate_nuke_script": true
+    },
+    "ai": {
+      "id": "ai",
+      "name": "Artificial Intelligence",
+      "description": "Central AI lab and per-shot references and generated outputs",
+      "enabled_by_default": false,
+      "root_folders": [
+        "ai_lab/prompts",
+        "ai_lab/references",
+        "ai_lab/models"
+      ],
+      "shot_folders": [
+        "ai/references",
+        "ai/outputs/v001"
+      ],
+      "generate_nuke_script": false
+    },
+    "3d_dcc": {
+      "id": "3d_dcc",
+      "name": "3D Traditional (Blender / Maya / Houdini)",
+      "description": "Shared 3D assets and per-shot scenes, tracking and caches",
+      "enabled_by_default": false,
+      "root_folders": [
+        "assets/3d/models",
+        "assets/3d/textures",
+        "assets/3d/hdri"
+      ],
+      "shot_folders": [
+        "3d/scenes",
+        "3d/tracking",
+        "3d/caches"
+      ],
+      "generate_nuke_script": false
+    },
+    "unreal": {
+      "id": "unreal",
+      "name": "Unreal Engine",
+      "description": "Centralized Unreal Engine project with Level Sequences per shot",
+      "enabled_by_default": false,
+      "root_folders": [
+        "unreal_projects/{project}_unreal/Config",
+        "unreal_projects/{project}_unreal/Content/environments",
+        "unreal_projects/{project}_unreal/Content/characters",
+        "unreal_projects/{project}_unreal/Content/fx",
+        "unreal_projects/{project}_unreal/Content/cinematics"
+      ],
+      "shot_folders": [],
+      "generate_nuke_script": false
+    }
+  }
+}
