@@ -285,8 +285,10 @@ class MainWindow(QMainWindow):
             return
 
         proj_path = Path(proj["path"])
-        mgr_win = ProjectManagerWindow(proj_path, parent=self)
-        mgr_win.show()
+        self.mgr_win = ProjectManagerWindow(proj_path, parent=self)
+        self.mgr_win.show()
+
+    def open_edit_dialog(self):
         proj = self.get_selected_project()
         if not proj:
             QMessageBox.information(self, "Selection", "Please select a project to modify.")
