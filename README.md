@@ -1,4 +1,4 @@
-# 🫖 Post Project Manager (ShotGrid-Lite)
+# 🫖 Post Project Manager
 ### *Portable Pipeline & Production Hub for VFX, Animation & Post Studios*
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
@@ -20,7 +20,7 @@
 ---
 
 ## 📖 What is Post Project Manager?
-**Post Project Manager** is a lightweight, high-performance desktop application that bridges the gap between directory scaffolding, shot tracking (ShotGrid-lite), visual VFX software automation, frame-accurate daily reviews, and versioned client deliveries. 
+**Post Project Manager** is a lightweight, high-performance desktop application that bridges the gap between directory scaffolding, visual shot tracking, visual VFX software automation, frame-accurate daily reviews, and versioned client deliveries. 
 
 It eliminates repetitive manual setup, ensures bulletproof folder conventions, automates scene file initialization with pre-connected pipeline `Read` and `Write` nodes, and gives artists and supervisors instant real-time oversight of every shot in production.
 
@@ -128,7 +128,7 @@ PROJECT_CODE/
 
 ---
 
-## 📊 4. ShotGrid-Lite Production Hub
+## 📊 4. Studio Production Hub & Shot Tracker
 Real-time production management table with complete shot observability:
 
 ![Project Manager Hub](docs/screenshots/03_project_manager_hub.png)
@@ -168,6 +168,7 @@ Built-in desktop player for quick, dependency-free dailies inspection:
 - [ ] **Sequence Timeline Render / Cut Review:** One-click automated compilation that stitches all rendered shots in a sequence (or the entire project) into a single continuous editorial video file.
 - [ ] **Automatic Burn-In Slate Generator:** Dynamic burned-in metadata (shot code, frame number, timecode, artist, and version) on rendered daily review movies.
 - [ ] **One-Click Project Backup & Archive:** Built-in tool to package and compress an entire project or selected sequences (with options to exclude heavy caches or temp files) into a clean backup archive.
+- [ ] **Automated Plate Denoising Pipeline:** Automated background denoising for ingested raw plates (using Neat Video or ML Denoisers) generating clean working plates and grain cache passes.
 
 ---
 

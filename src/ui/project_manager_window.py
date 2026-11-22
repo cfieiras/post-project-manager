@@ -1,5 +1,5 @@
 """
-Studio Project Manager Window (ShotGrid-Lite).
+Studio Project Manager Window.
 Next-generation production hub with visual thumbnails, DCC quick-launch badges,
 modern status pills, smart filter chips, one-click outdated render, and keyboard shortcuts.
 """
@@ -156,7 +156,7 @@ class ProjectManagerWindow(QMainWindow):
 
         main_layout.addLayout(filter_bar)
 
-        # 3. Main ShotGrid-Lite Table
+        # 3. Main Shot Production Table
         self.table = QTableWidget()
         self.table.setColumnCount(10)
         self.table.setHorizontalHeaderLabels([
