@@ -170,6 +170,7 @@ Built-in desktop player for quick, dependency-free dailies inspection:
 - [ ] **One-Click Project Backup & Archive:** Built-in tool to package and compress an entire project or selected sequences (with options to exclude heavy caches or temp files) into a clean backup archive.
 - [ ] **Automated Plate Denoising Pipeline:** Automated background denoising for ingested raw plates (using Neat Video or ML Denoisers) generating clean working plates and grain cache passes.
 - [ ] **Real-Time Collaborative Multi-User Sync:** Live synchronization and conflict-free sharing of project JSON metadata across network collaborators and cloud-synced teams to keep everyone up-to-date with the latest shot changes, supervisor notes, and delivery updates.
+- [ ] **In-App Update Alerts:** Automatic background check against GitHub Releases to notify artists when a new version or hotfix is available, complete with changelog highlights and one-click update access.
 
 ---
 
