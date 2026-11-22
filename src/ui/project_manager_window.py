@@ -14,12 +14,13 @@ from typing import Any, Dict, List, Optional
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QGroupBox,
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QGroupBox,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow,
-    QMenu, QMessageBox, QPushButton, QStatusBar, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget
+    QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QProgressDialog, QPushButton,
+    QStatusBar, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
 )
 
+from ..core.config_manager import get_dcc_paths
 from ..core.delivery_manager import DeliveryManager
 from ..core.nuke_runner import find_nuke_executable
 from ..core.shot_scanner import ShotScanner
@@ -27,6 +28,8 @@ from ..core.thumbnail_generator import ThumbnailManager
 from .batch_render_dialog import BatchRenderDialog
 from .delivery_setup_dialog import DeliverySetupDialog
 from .player_dialog import ReviewPlayerDialog
+from .studio_settings_dialog import StudioSettingsDialog
+from .theme import get_app_icon, get_app_icon_pixmap
 
 
 STATUS_STYLES = {
@@ -51,8 +54,10 @@ class ProjectManagerWindow(QMainWindow):
         self.scanned_shots: List[Dict[str, Any]] = []
         self.active_status_filter = "All"
         self.all_selected_state = False
+        self.render_queue_dialog: Optional[BatchRenderDialog] = None
 
         self.setWindowTitle(f"Project Manager - {self.project_path.name}")
+        self.setWindowIcon(get_app_icon())
         self.resize(1340, 780)
         self.setMinimumSize(1050, 640)
 
@@ -72,6 +77,10 @@ class ProjectManagerWindow(QMainWindow):
 
         # 1. Top Metadata & Sequence Filter Bar
         top_bar = QHBoxLayout()
+
+        logo_lbl = QLabel()
+        logo_lbl.setPixmap(get_app_icon_pixmap(24))
+        top_bar.addWidget(logo_lbl)
 
         settings = self.meta.get("project_settings", {})
         fps = settings.get("fps", 24.0)
@@ -94,9 +103,9 @@ class ProjectManagerWindow(QMainWindow):
         self.seq_filter_combo.currentTextChanged.connect(self.apply_filter)
         top_bar.addWidget(self.seq_filter_combo)
 
-        self.btn_delivery_settings = QPushButton("⚙ Delivery Settings")
-        self.btn_delivery_settings.clicked.connect(self.open_delivery_setup)
-        top_bar.addWidget(self.btn_delivery_settings)
+        self.btn_settings = QPushButton("⚙ Settings")
+        self.btn_settings.clicked.connect(self.open_studio_settings)
+        top_bar.addWidget(self.btn_settings)
 
         btn_refresh = QPushButton("↻ Refresh Disk")
         btn_refresh.clicked.connect(self.refresh_shots)
@@ -162,9 +171,12 @@ class ProjectManagerWindow(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(8, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(9, QHeaderView.ResizeToContents)
-        self.table.verticalHeader().setDefaultSectionSize(76)
+        self.table.horizontalHeader().setSectionResizeMode(8, QHeaderView.Interactive)
+        self.table.setColumnWidth(8, 200)
+        self.table.horizontalHeader().setSectionResizeMode(9, QHeaderView.Interactive)
+        self.table.setColumnWidth(9, 240)
+        self.table.setWordWrap(True)
+        self.table.verticalHeader().setDefaultSectionSize(82)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -298,19 +310,117 @@ class ProjectManagerWindow(QMainWindow):
                 with open(self.meta_file, "w", encoding="utf-8") as f:
                     json.dump(self.meta, f, indent=2, ensure_ascii=False)
                 self.update_delivery_label()
+        else:
+            # Delivery folder is configured and exists on disk.
+            # Check if project structure changed (new sequences/shots added).
+            deliv_path = Path(deliv)
+            sequences = self.meta.get("sequences", {})
+            missing = DeliveryManager.get_missing_delivery_shots(deliv_path, sequences)
+            if missing:
+                missing_str = "\n".join([f"• {seq}/{shot}" for seq, shot in missing[:12]])
+                if len(missing) > 12:
+                    missing_str += f"\n... and {len(missing) - 12} more shot(s)."
+
+                reply = QMessageBox.question(
+                    self,
+                    "Sync Delivery Structure",
+                    f"Project structure changes were detected!\n\n"
+                    f"The following {len(missing)} shot(s) are not yet scaffolded in your client delivery folder:\n"
+                    f"{missing_str}\n\n"
+                    f"Delivery Root:\n{deliv_path}\n\n"
+                    f"Would you like to sync and update the delivery directory structure now?",
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                if reply == QMessageBox.Yes:
+                    self._sync_delivery_folder_with_progress(deliv_path, sequences)
+
+    def _sync_delivery_folder_with_progress(self, delivery_path: Path, sequences: Dict[str, List[str]]):
+        total_shots = sum(len(shots) for shots in sequences.values())
+        progress_dlg = QProgressDialog(
+            "Syncing delivery folder structure...",
+            "Cancel",
+            0,
+            total_shots,
+            self
+        )
+        progress_dlg.setWindowTitle("Updating Delivery Structure")
+        progress_dlg.setWindowModality(Qt.WindowModal)
+        progress_dlg.setMinimumDuration(0)
+        progress_dlg.setValue(0)
+        QApplication.processEvents()
+
+        def on_sync_progress(cur: int, total: int, label: str):
+            if progress_dlg.wasCanceled():
+                return
+            progress_dlg.setValue(cur)
+            progress_dlg.setLabelText(f"[{cur}/{total}] {label}")
+            QApplication.processEvents()
+
+        try:
+            success, msg = DeliveryManager.setup_delivery_folder(
+                delivery_path=delivery_path,
+                sequences=sequences,
+                progress_callback=on_sync_progress
+            )
+        finally:
+            progress_dlg.close()
+
+        if success:
+            QMessageBox.information(
+                self,
+                "Delivery Sync Complete",
+                f"Client delivery directory structure successfully updated:\n\n{delivery_path}"
+            )
+            self.update_delivery_label()
+        else:
+            QMessageBox.warning(self, "Delivery Sync Error", f"Failed to update delivery structure:\n{msg}")
+
+    def open_studio_settings(self):
+        dialog = StudioSettingsDialog(
+            current_delivery_path=self.meta.get("delivery_dir"),
+            sequences=self.meta.get("sequences", {}),
+            project_settings=self.meta.get("project_settings"),
+            parent=self
+        )
+        if dialog.exec() == QDialog.Accepted:
+            changed = False
+            if dialog.selected_delivery_path:
+                self.meta["delivery_dir"] = dialog.selected_delivery_path
+                changed = True
+            if dialog.updated_project_settings:
+                self.meta["project_settings"] = dialog.updated_project_settings
+                changed = True
+
+            if changed:
+                with open(self.meta_file, "w", encoding="utf-8") as f:
+                    json.dump(self.meta, f, indent=2, ensure_ascii=False)
+                self.update_delivery_label()
+                self.refresh_shots()
 
     def open_delivery_setup(self):
-        dialog = DeliverySetupDialog(
-            current_path=self.meta.get("delivery_dir"),
-            sequences=self.meta.get("sequences", {}),
-            parent=self,
-            is_first_time=False
-        )
-        if dialog.exec() == QDialog.Accepted and dialog.selected_path:
-            self.meta["delivery_dir"] = dialog.selected_path
-            with open(self.meta_file, "w", encoding="utf-8") as f:
-                json.dump(self.meta, f, indent=2, ensure_ascii=False)
-            self.update_delivery_label()
+        self.open_studio_settings()
+
+    def get_delivered_versions_for_shot(self, shot: Dict[str, Any]) -> List[str]:
+        """Returns a list of versions already delivered for this shot on disk or in metadata."""
+        seq = shot.get("seq_name", "")
+        shot_name = shot.get("shot_name", "")
+        deliv_dir_str = self.meta.get("delivery_dir")
+        delivered = []
+        if deliv_dir_str and Path(deliv_dir_str).exists():
+            shot_deliv_path = Path(deliv_dir_str) / seq / shot_name
+            if shot_deliv_path.exists():
+                for v_dir in sorted(shot_deliv_path.glob("v*"), reverse=True):
+                    if v_dir.is_dir():
+                        rev_files = list((v_dir / "review").glob("*")) if (v_dir / "review").exists() else []
+                        hires_files = list((v_dir / "hires").glob("*")) if (v_dir / "hires").exists() else []
+                        if any(f.is_file() for f in rev_files) or any(f.is_file() for f in hires_files):
+                            delivered.append(v_dir.name)
+        # Also check saved shot_data
+        k = f"{seq}_{shot_name}"
+        saved_ver = self.shot_data.get(k, {}).get("last_delivered_version")
+        if saved_ver and saved_ver not in delivered:
+            delivered.append(saved_ver)
+        return delivered
 
     def refresh_shots(self):
         sequences = self.meta.get("sequences", {})
@@ -428,11 +538,17 @@ class ProjectManagerWindow(QMainWindow):
             )
             self.table.setCellWidget(row, 3, status_combo)
 
-            # 4. Notes LineEdit
-            notes_edit = QLineEdit(saved_info.get("notes", ""))
-            notes_edit.setPlaceholderText("Add supervisor or artist notes...")
-            notes_edit.editingFinished.connect(
-                lambda k=shot_key, ne=notes_edit: self.on_notes_changed(k, ne.text())
+            # 4. Notes Multiline TextEdit (Wraps lines downwards)
+            notes_edit = QPlainTextEdit(saved_info.get("notes", ""))
+            notes_edit.setPlaceholderText("Add notes...")
+            notes_edit.setTabChangesFocus(True)
+            notes_edit.setStyleSheet(
+                "QPlainTextEdit { background-color: #18181a; border: 1px solid #33333e; "
+                "border-radius: 4px; padding: 4px; color: #e0e0e0; font-size: 11px; }"
+                "QPlainTextEdit:focus { border: 1px solid #4da6ff; }"
+            )
+            notes_edit.textChanged.connect(
+                lambda k=shot_key, ne=notes_edit: self.on_notes_changed(k, ne.toPlainText())
             )
             self.table.setCellWidget(row, 4, notes_edit)
 
@@ -466,28 +582,34 @@ class ProjectManagerWindow(QMainWindow):
                 item_sync.setForeground(QColor("#81c784"))
             self.table.setItem(row, 7, item_sync)
 
-            # 8. Render Action Buttons
+            # 8. Render Action Buttons (Explicit Version Indication)
             render_widget = QWidget()
             rw_layout = QHBoxLayout(render_widget)
             rw_layout.setContentsMargins(2, 2, 2, 2)
             rw_layout.setSpacing(4)
 
-            btn_r_rev = QPushButton("Review")
-            btn_r_rev.setToolTip("Render Review MOV/MP4")
+            script_ver = shot.get("latest_script_version") or "v001"
+            btn_r_rev = QPushButton(f"▶ {script_ver}")
+            btn_r_rev.setToolTip(f"Render Review for {script_ver}")
             btn_r_rev.clicked.connect(lambda _, s=shot: self.render_single_shot(s, "Write_REVIEW"))
             rw_layout.addWidget(btn_r_rev)
 
-            btn_r_hires = QPushButton("Hires")
-            btn_r_hires.setToolTip("Render Hires EXR")
+            btn_r_hires = QPushButton(f"⚡ {script_ver}")
+            btn_r_hires.setToolTip(f"Render Hires EXR for {script_ver}")
             btn_r_hires.clicked.connect(lambda _, s=shot: self.render_single_shot(s, "Write_HIRES"))
             rw_layout.addWidget(btn_r_hires)
             self.table.setCellWidget(row, 8, render_widget)
 
-            # 9. Delivery Version Combo & Check
+            # 9. Delivery Version Combo & Check + Delivered Status Info
             deliv_widget = QWidget()
-            dw_layout = QHBoxLayout(deliv_widget)
+            dw_layout = QVBoxLayout(deliv_widget)
             dw_layout.setContentsMargins(4, 2, 4, 2)
-            dw_layout.setSpacing(6)
+            dw_layout.setSpacing(2)
+
+            top_row = QWidget()
+            top_layout = QHBoxLayout(top_row)
+            top_layout.setContentsMargins(0, 0, 0, 0)
+            top_layout.setSpacing(6)
 
             cb_deliver = QCheckBox("Deliver")
             cb_deliver.setChecked(saved_info.get("marked_for_delivery", False))
@@ -495,14 +617,15 @@ class ProjectManagerWindow(QMainWindow):
             combo_deliv_ver = QComboBox()
             all_vers = sorted(list(set(
                 list(shot.get("all_review_versions", {}).keys()) +
-                shot.get("all_hires_versions", [])
+                shot.get("all_hires_versions", []) +
+                shot.get("all_script_versions", [])
             )), reverse=True)
             if not all_vers:
                 all_vers = ["v001"]
             for v in all_vers:
                 combo_deliv_ver.addItem(v)
 
-            saved_ver = saved_info.get("delivery_version")
+            saved_ver = saved_info.get("delivery_version") or shot.get("latest_script_version") or shot.get("latest_review_version")
             if saved_ver and saved_ver in all_vers:
                 combo_deliv_ver.setCurrentText(saved_ver)
 
@@ -513,8 +636,35 @@ class ProjectManagerWindow(QMainWindow):
                 lambda val, k=shot_key, cb=cb_deliver: self.on_delivery_toggled(k, cb.isChecked(), val)
             )
 
-            dw_layout.addWidget(cb_deliver)
-            dw_layout.addWidget(combo_deliv_ver)
+            top_layout.addWidget(cb_deliver)
+            top_layout.addWidget(combo_deliv_ver)
+            dw_layout.addWidget(top_row)
+
+            # Delivered status indicator
+            delivered_vers = self.get_delivered_versions_for_shot(shot)
+            bottom_row = QHBoxLayout()
+            bottom_row.setContentsMargins(0, 0, 0, 0)
+            bottom_row.setSpacing(4)
+
+            lbl_deliv_title = QLabel("Delivered:")
+            lbl_deliv_title.setStyleSheet("color: #888892; font-size: 10px;")
+            bottom_row.addWidget(lbl_deliv_title)
+
+            if delivered_vers:
+                deliv_txt = ", ".join(delivered_vers)
+                lbl_deliv_val = QLabel(f"✔ {deliv_txt}")
+                lbl_deliv_val.setStyleSheet(
+                    "background-color: #2b3a32; color: #81c784; border: 1px solid #388e3c; "
+                    "border-radius: 3px; font-weight: bold; font-size: 10px; padding: 1px 4px;"
+                )
+            else:
+                lbl_deliv_val = QLabel("None")
+                lbl_deliv_val.setStyleSheet("color: #757575; font-size: 10px; padding: 1px 2px;")
+
+            bottom_row.addWidget(lbl_deliv_val)
+            bottom_row.addStretch()
+            dw_layout.addLayout(bottom_row)
+
             self.table.setCellWidget(row, 9, deliv_widget)
 
         self.status_bar.showMessage(f"Displaying {len(shots)} of {len(self.scanned_shots)} shots.")
@@ -624,10 +774,16 @@ class ProjectManagerWindow(QMainWindow):
             QMessageBox.information(self, "No Renders", "No review renders found for this shot.")
             return
 
+        settings = self.meta.get("project_settings", {})
+        fps = float(settings.get("fps", 24.0))
+        frame_start = int(settings.get("frame_start", 1001))
+
         dialog = ReviewPlayerDialog(
             shot_name=shot["shot_name"],
             review_versions=rev_dict,
             initial_version=latest_v,
+            fps=fps,
+            frame_start=frame_start,
             parent=self
         )
         dialog.exec()
@@ -642,44 +798,89 @@ class ProjectManagerWindow(QMainWindow):
                     selected.append(item.data(Qt.UserRole))
         return selected
 
+    def _queue_render_jobs(
+        self,
+        shots: List[Dict[str, Any]],
+        write_node: Optional[str] = None,
+        explicit_script_path: Optional[str] = None,
+        explicit_version: Optional[str] = None
+    ):
+        """Enqueues shots to the central sequential render dialog, avoiding multiple simultaneous Nuke runs."""
+        valid_shots = [s for s in shots if s.get("latest_script_path") or explicit_script_path]
+        if not valid_shots:
+            QMessageBox.warning(self, "Missing Scripts", "No Nuke script found for the selected shot(s).")
+            return
+
+        if self.render_queue_dialog is None or not self.render_queue_dialog.isVisible():
+            self.render_queue_dialog = BatchRenderDialog(valid_shots, parent=self)
+            self.render_queue_dialog.renders_completed.connect(self.refresh_shots)
+            if write_node == "Write_REVIEW":
+                self.render_queue_dialog.rb_review.setChecked(True)
+            elif write_node == "Write_HIRES":
+                self.render_queue_dialog.rb_hires.setChecked(True)
+            self.render_queue_dialog.show()
+            self.render_queue_dialog.enqueue_shots(
+                valid_shots,
+                target_write_node=write_node,
+                explicit_script_path=explicit_script_path,
+                explicit_version=explicit_version
+            )
+        else:
+            self.render_queue_dialog.enqueue_shots(
+                valid_shots,
+                target_write_node=write_node,
+                explicit_script_path=explicit_script_path,
+                explicit_version=explicit_version
+            )
+            self.render_queue_dialog.raise_()
+            self.render_queue_dialog.activateWindow()
+
     def on_render_outdated_clicked(self):
         outdated_shots = [s for s in self.scanned_shots if s.get("is_outdated")]
         if not outdated_shots:
             QMessageBox.information(self, "Up to Date", "All shots are currently up to date!")
             return
-
-        dialog = BatchRenderDialog(outdated_shots, parent=self)
-        dialog.exec()
-        self.refresh_shots()
+        self._queue_render_jobs(outdated_shots)
 
     def on_batch_render(self):
         selected = self.get_selected_shots()
         if not selected:
             QMessageBox.information(self, "Selection Required", "Please select at least one shot via the checkbox.")
             return
+        self._queue_render_jobs(selected)
 
-        dialog = BatchRenderDialog(selected, parent=self)
-        dialog.exec()
-        self.refresh_shots()
-
-    def render_single_shot(self, shot: Dict[str, Any], write_node: str):
-        if not shot.get("latest_script_path"):
+    def render_single_shot(
+        self,
+        shot: Dict[str, Any],
+        write_node: str,
+        explicit_script_path: Optional[str] = None,
+        explicit_version: Optional[str] = None
+    ):
+        target_path = explicit_script_path or shot.get("latest_script_path")
+        if not target_path:
             QMessageBox.warning(self, "Missing Script", f"No Nuke script found for {shot['shot_name']}.")
             return
+        self._queue_render_jobs(
+            [shot],
+            write_node=write_node,
+            explicit_script_path=target_path,
+            explicit_version=explicit_version
+        )
 
-        dialog = BatchRenderDialog([shot], parent=self)
-        if write_node == "Write_REVIEW":
-            dialog.rb_review.setChecked(True)
-        else:
-            dialog.rb_hires.setChecked(True)
-        dialog.start_rendering()
-        dialog.exec()
-        self.refresh_shots()
+    def render_all_versions_of_shot(self, shot: Dict[str, Any]):
+        all_scripts = shot.get("all_script_files", {})
+        if not all_scripts:
+            QMessageBox.warning(self, "Missing Scripts", f"No Nuke scripts found for {shot['shot_name']}.")
+            return
+        for ver in shot.get("all_script_versions", sorted(all_scripts.keys())):
+            path = all_scripts.get(ver)
+            if path:
+                self._queue_render_jobs([shot], write_node="Write_REVIEW", explicit_script_path=path, explicit_version=ver)
 
     def on_execute_delivery(self):
         deliv_dir_str = self.meta.get("delivery_dir")
         if not deliv_dir_str or not Path(deliv_dir_str).exists():
-            QMessageBox.warning(self, "Delivery Error", "Delivery directory is not configured. Please click Delivery Settings.")
+            QMessageBox.warning(self, "Delivery Error", "Delivery directory is not configured. Please click Settings.")
             return
 
         delivery_root = Path(deliv_dir_str)
@@ -701,27 +902,112 @@ class ProjectManagerWindow(QMainWindow):
             QMessageBox.information(self, "No Shots Marked", "No shots are marked for delivery. Check the 'Deliver' box on the shots you wish to send.")
             return
 
-        reply = QMessageBox.question(
-            self,
-            "Confirm Delivery",
-            f"You are about to deliver {len(to_deliver)} shots to:\n{delivery_root}\n\nProceed with transfer?",
-            QMessageBox.Yes | QMessageBox.No
-        )
-        if reply != QMessageBox.Yes:
+        # Check render files on disk before executing delivery
+        check_results = DeliveryManager.check_delivery_files(self.project_path, to_deliver)
+        missing_items = [item for item in check_results if item["missing"]]
+
+        any_files_found = any(item["has_review"] or item["has_hires"] for item in check_results)
+        if not any_files_found:
+            QMessageBox.critical(
+                self,
+                "Missing Renders",
+                "None of the selected shots have rendered review or hires files on disk for their chosen delivery versions.\n\n"
+                "Please render the shots before executing client delivery."
+            )
             return
 
-        success, msg, files = DeliveryManager.execute_delivery(
-            project_dir=self.project_path,
-            delivery_root=delivery_root,
-            deliveries=to_deliver
+        if missing_items:
+            details_lines = []
+            for item in missing_items:
+                shot_name = item["shot_name"]
+                ver = item["version"]
+                missing = item["missing"]
+                if "review" in missing and "hires" in missing:
+                    status_desc = "Missing BOTH Hires EXR & Review MOV"
+                elif "hires" in missing:
+                    status_desc = "Missing Hires EXR (Review MOV found)"
+                else:
+                    status_desc = "Missing Review MOV (Hires EXR found)"
+                details_lines.append(f"• {shot_name} ({ver}): {status_desc}")
+
+            shots_summary = "\n".join(details_lines[:15])
+            if len(details_lines) > 15:
+                shots_summary += f"\n... and {len(details_lines) - 15} more shots with missing renders."
+
+            warn_msg = (
+                f"<b>Missing Renders Detected!</b><br><br>"
+                f"The following {len(missing_items)} of {len(to_deliver)} selected shot(s) are missing render files for their delivery version:<br><br>"
+                f"<pre style='background-color: #2b2b36; padding: 10px; border-radius: 4px; color: #ffb74d;'>{shots_summary}</pre><br>"
+                f"If you continue, only the available render files will be copied to:<br>"
+                f"<code>{delivery_root}</code><br><br>"
+                f"Do you want to proceed anyway?"
+            )
+
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("Missing Render Warning")
+            msg_box.setIcon(QMessageBox.Warning)
+            msg_box.setTextFormat(Qt.RichText)
+            msg_box.setText(warn_msg)
+            btn_deliver_anyway = msg_box.addButton("Deliver Available Files", QMessageBox.AcceptRole)
+            btn_cancel = msg_box.addButton("Cancel", QMessageBox.RejectRole)
+            msg_box.setDefaultButton(btn_cancel)
+            msg_box.exec()
+
+            if msg_box.clickedButton() != btn_deliver_anyway:
+                return
+        else:
+            reply = QMessageBox.question(
+                self,
+                "Confirm Delivery",
+                f"You are about to deliver {len(to_deliver)} shots to:\n{delivery_root}\n\n"
+                f"All review and hires renders verified on disk.\n\n"
+                f"Proceed with transfer?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        # Active progress loader dialog during delivery
+        progress_dlg = QProgressDialog(
+            "Transferring shots to client delivery folder...",
+            "Cancel",
+            0,
+            len(to_deliver),
+            self
         )
+        progress_dlg.setWindowTitle("Delivering Shots to Client")
+        progress_dlg.setWindowModality(Qt.WindowModal)
+        progress_dlg.setMinimumDuration(0)
+        progress_dlg.setValue(0)
+        QApplication.processEvents()
+
+        def on_delivery_progress(cur: int, total: int, label: str):
+            if progress_dlg.wasCanceled():
+                return
+            progress_dlg.setValue(cur)
+            progress_dlg.setLabelText(f"[{cur}/{total}] {label}")
+            QApplication.processEvents()
+
+        try:
+            success, msg, files = DeliveryManager.execute_delivery(
+                project_dir=self.project_path,
+                delivery_root=delivery_root,
+                deliveries=to_deliver,
+                progress_callback=on_delivery_progress
+            )
+        finally:
+            progress_dlg.close()
 
         if success:
             QMessageBox.information(self, "Delivery Complete", f"{msg}\n\nDestination:\n{delivery_root}")
+            check_map = {f"{c['seq_name']}_{c['shot_name']}": c for c in check_results}
             for item in to_deliver:
                 k = f"{item['seq_name']}_{item['shot_name']}"
-                if k in self.shot_data:
-                    self.shot_data[k]["status"] = "Delivered"
+                res = check_map.get(k)
+                if res and (res["has_review"] or res["has_hires"]):
+                    if k in self.shot_data:
+                        self.shot_data[k]["status"] = "Delivered"
+                        self.shot_data[k]["last_delivered_version"] = item["version"]
             self.save_shot_data()
             self.refresh_shots()
         else:
@@ -816,15 +1102,38 @@ class ProjectManagerWindow(QMainWindow):
         menu.addSeparator()
 
         # 4. Review / Render Options
+        latest_ver = shot.get("latest_script_version") or "v001"
+        all_vers = shot.get("all_script_versions", [])
+
         if shot.get("latest_review_path"):
             act_play = menu.addAction(f"▶ Play Latest Review ({shot.get('latest_review_version')})")
             act_play.triggered.connect(lambda _, s=shot: self.open_player(s))
 
-        act_r_rev = menu.addAction("🚀 Render Review MOV (Nuke)")
+        act_r_rev = menu.addAction(f"🚀 Render Review ({latest_ver})")
         act_r_rev.triggered.connect(lambda _, s=shot: self.render_single_shot(s, "Write_REVIEW"))
 
-        act_r_hi = menu.addAction("🚀 Render Hires EXR (Nuke)")
+        act_r_hi = menu.addAction(f"🚀 Render Hires ({latest_ver})")
         act_r_hi.triggered.connect(lambda _, s=shot: self.render_single_shot(s, "Write_HIRES"))
+
+        # Specific version rendering submenu if scripts exist
+        if all_vers:
+            ver_menu = menu.addMenu("🎯 Render Specific Script Version...")
+            for v_name in all_vers:
+                v_path = shot.get("all_script_files", {}).get(v_name)
+                if v_path:
+                    v_sub = ver_menu.addMenu(f"📄 {v_name}")
+                    act_v_rev = v_sub.addAction("Render Review MOV/MP4")
+                    act_v_rev.triggered.connect(
+                        lambda _, s=shot, p=v_path, v=v_name: self.render_single_shot(s, "Write_REVIEW", explicit_script_path=p, explicit_version=v)
+                    )
+                    act_v_hi = v_sub.addAction("Render Hires EXR")
+                    act_v_hi.triggered.connect(
+                        lambda _, s=shot, p=v_path, v=v_name: self.render_single_shot(s, "Write_HIRES", explicit_script_path=p, explicit_version=v)
+                    )
+
+            if len(all_vers) > 1:
+                act_all_v = menu.addAction(f"⚡ Render All Script Versions ({len(all_vers)} versions)")
+                act_all_v.triggered.connect(lambda _, s=shot: self.render_all_versions_of_shot(s))
 
         menu.addSeparator()
 
@@ -855,22 +1164,35 @@ class ProjectManagerWindow(QMainWindow):
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
     def launch_file(self, file_path: Path):
-        """Launches a DCC scene with its associated software or detected executable."""
+        """Launches a DCC scene with its configured application executable or system default."""
         if not file_path.exists():
             QMessageBox.warning(self, "File Not Found", f"File does not exist: {file_path}")
             return
 
         str_path = str(file_path)
+        ext = file_path.suffix.lower()
+        dcc_paths = get_dcc_paths()
 
-        # For Nuke scripts (.nk), prefer detected Nuke executable if available
-        if file_path.suffix.lower() == ".nk":
-            nuke_exe = find_nuke_executable()
-            if nuke_exe and Path(nuke_exe).exists():
-                try:
-                    subprocess.Popen([nuke_exe, str_path])
-                    return
-                except Exception as e:
-                    print(f"Warning: Direct Nuke launch failed: {e}")
+        exe_path = ""
+        if ext == ".nk":
+            exe_path = dcc_paths.get("nuke") or find_nuke_executable() or ""
+        elif ext in [".ma", ".mb"]:
+            exe_path = dcc_paths.get("maya", "")
+        elif ext == ".blend":
+            exe_path = dcc_paths.get("blender", "")
+        elif ext == ".aep":
+            exe_path = dcc_paths.get("after_effects", "")
+        elif ext in [".hip", ".hiplc", ".hipnc"]:
+            exe_path = dcc_paths.get("houdini", "")
+        elif ext == ".uproject":
+            exe_path = dcc_paths.get("unreal", "")
+
+        if exe_path and Path(exe_path).exists():
+            try:
+                subprocess.Popen([exe_path, str_path])
+                return
+            except Exception as e:
+                print(f"Warning: Direct launch with {exe_path} failed: {e}")
 
         # Fallback to system OS file associations
         try:

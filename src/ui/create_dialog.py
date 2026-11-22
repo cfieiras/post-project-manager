@@ -1,19 +1,243 @@
 """
 Project Creation and Modification Dialog with Live Tree Preview.
-Clean, artist-friendly UI with visual sequence/shot management and custom resolution support.
+Clean, artist-friendly UI with visual sequence/shot management (Option B) and custom resolution support.
 """
 
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox,
-    QSpinBox, QCheckBox, QPushButton, QTreeWidget, QTreeWidgetItem,
-    QGroupBox, QFormLayout, QSplitter, QMessageBox, QTableWidget,
-    QTableWidgetItem, QHeaderView, QWidget
+    QCheckBox, QComboBox, QDialog, QFormLayout, QGroupBox,
+    QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
+    QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter,
+    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
 )
 
 from ..core.pipeline import PipelineManager
+from .theme import get_app_icon
+
+
+MODULE_DISPLAY_NAMES = {
+    "comp": "Compositing",
+    "ai": "AI",
+    "3d_dcc": "3D Traditional",
+    "unreal": "Unreal Engine"
+}
+
+
+class SeqShotTreeWidget(QTreeWidget):
+    """
+    Hierarchical tree widget for Sequences and Shots management.
+    Displays Sequences as expandable root items and Shots as clean child items.
+    """
+    changed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setHeaderLabels(["Sequence & Shot Hierarchy"])
+        self.header().setStretchLastSection(True)
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.itemDoubleClicked.connect(self.on_item_double_clicked)
+        self.customContextMenuRequested.connect(self.on_context_menu)
+        self.setStyleSheet(
+            "QTreeWidget { background-color: #18181a; border: 1px solid #3d3d46; border-radius: 4px; padding: 4px; }"
+            "QTreeWidget::item { padding: 4px 6px; margin: 1px 0px; border-radius: 3px; }"
+            "QTreeWidget::item:hover { background-color: #282832; }"
+            "QTreeWidget::item:selected { background-color: #0078d4; color: #ffffff; }"
+        )
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Delete:
+            self.remove_selected()
+        elif event.key() == Qt.Key_F2:
+            item = self.currentItem()
+            if item:
+                self.on_item_double_clicked(item, 0)
+        else:
+            super().keyPressEvent(event)
+
+    def add_sequence(self, seq_name: str, shots: Optional[List[str]] = None) -> QTreeWidgetItem:
+        clean_seq = seq_name.strip().lower()
+        if not clean_seq:
+            clean_seq = f"sq{(self.topLevelItemCount() + 1) * 10:03d}"
+
+        if shots is None:
+            shots = ["sh010", "sh020", "sh030"]
+
+        clean_shots = []
+        for s in shots:
+            if s.startswith(f"{clean_seq}_"):
+                clean_shots.append(s[len(f"{clean_seq}_"):])
+            else:
+                clean_shots.append(s)
+
+        seq_item = QTreeWidgetItem(self)
+        seq_item.setData(0, Qt.UserRole, {"type": "seq", "name": clean_seq})
+        seq_item.setText(0, f"📁 {clean_seq}  ({len(clean_shots)} shots)")
+        seq_item.setFlags(seq_item.flags() | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+
+        for s in clean_shots:
+            shot_item = QTreeWidgetItem(seq_item)
+            shot_item.setData(0, Qt.UserRole, {"type": "shot", "name": s, "seq": clean_seq})
+            shot_item.setText(0, f"🎬 {s}")
+            shot_item.setFlags(shot_item.flags() | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+
+        seq_item.setExpanded(True)
+        self.changed.emit()
+        return seq_item
+
+    def get_data(self) -> Dict[str, List[str]]:
+        result = {}
+        for i in range(self.topLevelItemCount()):
+            seq_item = self.topLevelItem(i)
+            info = seq_item.data(0, Qt.UserRole)
+            if not info:
+                continue
+            seq_name = info["name"]
+            shot_list = []
+            for j in range(seq_item.childCount()):
+                shot_item = seq_item.child(j)
+                shot_info = shot_item.data(0, Qt.UserRole)
+                if shot_info:
+                    shot_list.append(shot_info["name"])
+            result[seq_name] = shot_list
+        return result
+
+    def add_shot_to_selected(self):
+        item = self.currentItem()
+        target_seq = None
+        if item:
+            info = item.data(0, Qt.UserRole)
+            if info and info.get("type") == "seq":
+                target_seq = item
+            elif info and info.get("type") == "shot":
+                target_seq = item.parent()
+
+        if not target_seq and self.topLevelItemCount() > 0:
+            target_seq = self.topLevelItem(self.topLevelItemCount() - 1)
+
+        if target_seq:
+            self.add_shot_to_seq(target_seq)
+
+    def add_shot_to_seq(self, seq_item: QTreeWidgetItem):
+        info = seq_item.data(0, Qt.UserRole)
+        seq_name = info["name"]
+        next_num = (seq_item.childCount() + 1) * 10
+        shot_name = f"sh{next_num:03d}"
+
+        shot_item = QTreeWidgetItem(seq_item)
+        shot_item.setData(0, Qt.UserRole, {"type": "shot", "name": shot_name, "seq": seq_name})
+        shot_item.setText(0, f"🎬 {shot_name}")
+        seq_item.setText(0, f"📁 {seq_name}  ({seq_item.childCount()} shots)")
+        seq_item.setExpanded(True)
+        self.setCurrentItem(shot_item)
+        self.changed.emit()
+
+    def add_new_sequence(self):
+        next_idx = (self.topLevelItemCount() + 1) * 10
+        seq_name = f"sq{next_idx:03d}"
+        item = self.add_sequence(seq_name)
+        self.setCurrentItem(item)
+
+    def rename_selected(self):
+        item = self.currentItem()
+        if item:
+            self.on_item_double_clicked(item, 0)
+
+    def on_item_double_clicked(self, item: QTreeWidgetItem, col: int):
+        info = item.data(0, Qt.UserRole)
+        if not info:
+            return
+
+        if info["type"] == "seq":
+            new_name, ok = QInputDialog.getText(
+                self,
+                "Rename Sequence",
+                "Enter sequence identifier:",
+                QLineEdit.Normal,
+                info["name"]
+            )
+            if ok and new_name.strip():
+                clean = new_name.strip().lower()
+                info["name"] = clean
+                item.setData(0, Qt.UserRole, info)
+                item.setText(0, f"📁 {clean}  ({item.childCount()} shots)")
+                # Update seq reference in all child shots
+                for j in range(item.childCount()):
+                    c_item = item.child(j)
+                    c_info = c_item.data(0, Qt.UserRole)
+                    if c_info:
+                        c_info["seq"] = clean
+                        c_item.setData(0, Qt.UserRole, c_info)
+                self.changed.emit()
+
+        elif info["type"] == "shot":
+            new_name, ok = QInputDialog.getText(
+                self,
+                "Rename Shot",
+                f"Enter shot identifier for '{info['seq']}':",
+                QLineEdit.Normal,
+                info["name"]
+            )
+            if ok and new_name.strip():
+                clean = new_name.strip().lower()
+                if clean.startswith(f"{info['seq']}_"):
+                    clean = clean[len(f"{info['seq']}_"):]
+                info["name"] = clean
+                item.setData(0, Qt.UserRole, info)
+                item.setText(0, f"🎬 {clean}")
+                self.changed.emit()
+
+    def remove_selected(self):
+        item = self.currentItem()
+        if item:
+            self.remove_item(item)
+
+    def remove_item(self, item: QTreeWidgetItem):
+        info = item.data(0, Qt.UserRole)
+        if not info:
+            return
+
+        if info["type"] == "seq":
+            if self.topLevelItemCount() <= 1:
+                QMessageBox.warning(self, "Action Denied", "At least one sequence is required in the project.")
+                return
+            reply = QMessageBox.question(
+                self,
+                "Confirm Removal",
+                f"Remove sequence '{info['name']}' and all its shots?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                idx = self.indexOfTopLevelItem(item)
+                self.takeTopLevelItem(idx)
+                self.changed.emit()
+
+        elif info["type"] == "shot":
+            parent = item.parent()
+            if parent:
+                parent.removeChild(item)
+                p_info = parent.data(0, Qt.UserRole)
+                parent.setText(0, f"📁 {p_info['name']}  ({parent.childCount()} shots)")
+                self.changed.emit()
+
+    def on_context_menu(self, pos):
+        item = self.itemAt(pos)
+        menu = QMenu(self)
+        if item:
+            info = item.data(0, Qt.UserRole)
+            if info and info["type"] == "seq":
+                menu.addAction("➕ Add Shot to Sequence", lambda: self.add_shot_to_seq(item))
+                menu.addAction("✎ Rename Sequence", lambda: self.on_item_double_clicked(item, 0))
+                if self.topLevelItemCount() > 1:
+                    menu.addAction("✕ Remove Sequence", lambda: self.remove_item(item))
+            elif info and info["type"] == "shot":
+                menu.addAction("✎ Rename Shot", lambda: self.on_item_double_clicked(item, 0))
+                menu.addAction("✕ Remove Shot", lambda: self.remove_item(item))
+        else:
+            menu.addAction("➕ Add Sequence", self.add_new_sequence)
+        menu.exec(self.mapToGlobal(pos))
 
 
 class ProjectDialog(QDialog):
@@ -36,8 +260,9 @@ class ProjectDialog(QDialog):
         self.project_path = project_path
 
         self.setWindowTitle("Modify Project" if edit_mode else "Create New Post Project")
-        self.resize(1000, 720)
-        self.setMinimumSize(900, 620)
+        self.setWindowIcon(get_app_icon())
+        self.resize(1120, 880)
+        self.setMinimumSize(980, 780)
 
         self.init_ui()
         self.populate_initial_data()
@@ -53,11 +278,13 @@ class ProjectDialog(QDialog):
             "Project Architecture & Scaffolding" if not self.edit_mode
             else f"Modify Project: {self.project_path.name}"
         )
-        title_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #4da6ff;")
-        main_layout.addWidget(title_label)
+        title_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #4da6ff; padding: 2px 0px;")
+        title_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        main_layout.addWidget(title_label, stretch=0)
 
         # Main Splitter (Left: Controls, Right: Live Tree Preview)
         splitter = QSplitter(Qt.Horizontal)
+        splitter.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         # ----------------- LEFT WIDGET -----------------
         left_widget = QWidget()
@@ -133,16 +360,41 @@ class ProjectDialog(QDialog):
         ])
         settings_form.addRow("Color Management:", self.color_combo)
 
+        # Review Resolution Preset
+        self.review_res_combo = QComboBox()
+        self.review_res_combo.addItems([
+            "Same as Project (100%)",
+            "1920x1080 (HD_1080)",
+            "1280x720 (720p HD)",
+            "960x540 (Half HD - 540p)"
+        ])
+        settings_form.addRow("Review Resolution:", self.review_res_combo)
+
+        # Review Video Codec & Format
+        self.review_format_combo = QComboBox()
+        self.review_format_combo.addItems([
+            "MOV - Apple ProRes 422",
+            "MOV - Apple ProRes 422 Proxy",
+            "MP4 - H.264",
+            "MOV - H.264"
+        ])
+        settings_form.addRow("Review Format & Codec:", self.review_format_combo)
+
         left_layout.addWidget(settings_group)
 
-        # 3. Active Modules
+        # 3. Active Modules (Clean names without parentheses)
         modules_group = QGroupBox("Active Modules")
         modules_layout = QVBoxLayout(modules_group)
         self.module_checkboxes: Dict[str, QCheckBox] = {}
 
         modules_data = self.pm.template.get("modules", {})
         for mod_id, mod_info in modules_data.items():
-            cb = QCheckBox(f"{mod_info.get('name', mod_id)} ({mod_id})")
+            clean_label = MODULE_DISPLAY_NAMES.get(mod_id)
+            if not clean_label:
+                raw_name = mod_info.get("name", mod_id)
+                clean_label = re.sub(r"\s*\(.*?\)", "", raw_name).strip()
+
+            cb = QCheckBox(clean_label)
             cb.setChecked(mod_info.get("enabled_by_default", False))
             cb.stateChanged.connect(self.update_preview)
             self.module_checkboxes[mod_id] = cb
@@ -150,29 +402,50 @@ class ProjectDialog(QDialog):
 
         left_layout.addWidget(modules_group)
 
-        # 4. Sequences & Shots Visual Management
+        # 4. Sequences & Shots Tree Management
         seq_group = QGroupBox("Sequences & Shots Management")
         seq_layout = QVBoxLayout(seq_group)
-        seq_layout.setSpacing(8)
+        seq_layout.setSpacing(6)
 
-        # Table of sequences
-        self.seq_table = QTableWidget()
-        self.seq_table.setColumnCount(4)
-        self.seq_table.setHorizontalHeaderLabels(["Sequence", "Shots", "Shots Generated Preview", ""])
-        self.seq_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.seq_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.seq_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        self.seq_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self.seq_table.verticalHeader().setVisible(False)
-        self.seq_table.setSelectionMode(QTableWidget.NoSelection)
-        seq_layout.addWidget(self.seq_table)
+        # Toolbar above the tree
+        seq_bar = QHBoxLayout()
+        seq_bar.setSpacing(6)
 
         btn_add_seq = QPushButton("+ Add Sequence")
-        btn_add_seq.clicked.connect(self.add_sequence_row)
-        seq_layout.addWidget(btn_add_seq)
+        btn_add_seq.clicked.connect(lambda: self.seq_tree.add_new_sequence())
+        seq_bar.addWidget(btn_add_seq)
 
-        left_layout.addWidget(seq_group)
-        splitter.addWidget(left_widget)
+        btn_add_shot = QPushButton("+ Add Shot")
+        btn_add_shot.clicked.connect(lambda: self.seq_tree.add_shot_to_selected())
+        seq_bar.addWidget(btn_add_shot)
+
+        btn_rename = QPushButton("✎ Rename")
+        btn_rename.clicked.connect(lambda: self.seq_tree.rename_selected())
+        seq_bar.addWidget(btn_rename)
+
+        btn_remove = QPushButton("✕ Remove")
+        btn_remove.clicked.connect(lambda: self.seq_tree.remove_selected())
+        seq_bar.addWidget(btn_remove)
+
+        seq_bar.addStretch()
+        seq_layout.addLayout(seq_bar)
+
+        # Tree view
+        self.seq_tree = SeqShotTreeWidget(parent=self)
+        self.seq_tree.setMinimumHeight(240)
+        self.seq_tree.changed.connect(self.update_preview)
+        seq_layout.addWidget(self.seq_tree, stretch=1)
+
+        left_layout.addWidget(seq_group, stretch=1)
+
+        # Wrap left widget in a scroll area to guarantee clean layout on all displays
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        left_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        left_scroll.setWidget(left_widget)
+
+        splitter.addWidget(left_scroll)
 
         # ----------------- RIGHT WIDGET (Live Tree Preview) -----------------
         right_widget = QGroupBox("Live Directory Tree Preview")
@@ -183,9 +456,10 @@ class ProjectDialog(QDialog):
         right_layout.addWidget(self.tree_widget)
 
         splitter.addWidget(right_widget)
+        splitter.setHandleWidth(6)
         splitter.setStretchFactor(0, 5)
         splitter.setStretchFactor(1, 5)
-        main_layout.addWidget(splitter)
+        main_layout.addWidget(splitter, stretch=1)
 
         # Bottom Action Buttons
         btn_layout = QHBoxLayout()
@@ -213,92 +487,21 @@ class ProjectDialog(QDialog):
             self.width_spin.setValue(w)
             self.height_spin.setValue(h)
 
-    def add_sequence_row(self, seq_name: Optional[str] = None, shot_count: int = 3):
-        row = self.seq_table.rowCount()
-        self.seq_table.insertRow(row)
-
-        if not seq_name:
-            # Calculate next default sequence name (sq010, sq020, etc.)
-            seq_name = f"sq{(row + 1) * 10:03d}"
-
-        # 1. Sequence Name Item
-        seq_item = QTableWidgetItem(seq_name)
-        seq_item.setTextAlignment(Qt.AlignCenter)
-        self.seq_table.setItem(row, 0, seq_item)
-
-        # 2. Shots Count Spinbox
-        spin = QSpinBox()
-        spin.setRange(1, 100)
-        spin.setValue(shot_count)
-        spin.valueChanged.connect(lambda: self.on_sequence_changed(row))
-        self.seq_table.setCellWidget(row, 1, spin)
-
-        # 3. Preview Item
-        preview_item = QTableWidgetItem("")
-        preview_item.setFlags(preview_item.flags() & ~Qt.ItemIsEditable)
-        self.seq_table.setItem(row, 2, preview_item)
-
-        # 4. Delete Button
-        btn_del = QPushButton("✕")
-        btn_del.setToolTip("Remove Sequence")
-        btn_del.setStyleSheet("color: #ff5252; font-weight: bold; padding: 2px 8px;")
-        btn_del.clicked.connect(lambda: self.remove_sequence_row(row))
-        self.seq_table.setCellWidget(row, 3, btn_del)
-
-        self.update_row_preview(row)
-        self.update_preview()
-
-    def remove_sequence_row(self, row: int):
-        self.seq_table.removeRow(row)
-        # Reconnect buttons to updated row indices
-        for r in range(self.seq_table.rowCount()):
-            btn = self.seq_table.cellWidget(r, 3)
-            if btn:
-                btn.clicked.disconnect()
-                btn.clicked.connect(lambda curr_r=r: self.remove_sequence_row(curr_r))
-        self.update_preview()
-
-    def on_sequence_changed(self, row: int):
-        self.update_row_preview(row)
-        self.update_preview()
-
-    def update_row_preview(self, row: int):
-        seq_item = self.seq_table.item(row, 0)
-        spin = self.seq_table.cellWidget(row, 1)
-        preview_item = self.seq_table.item(row, 2)
-        if seq_item and spin and preview_item:
-            s_name = seq_item.text().strip().lower()
-            count = spin.value()
-            shots = [f"{s_name}_sh{i * 10:03d}" for i in range(1, count + 1)]
-            preview_item.setText(", ".join(shots))
-
     def get_sequences(self) -> Dict[str, List[str]]:
-        result = {}
-        for row in range(self.seq_table.rowCount()):
-            seq_item = self.seq_table.item(row, 0)
-            spin = self.seq_table.cellWidget(row, 1)
-            if seq_item and spin:
-                s_name = seq_item.text().strip().lower()
-                count = spin.value()
-                if s_name:
-                    result[s_name] = [f"{s_name}_sh{i * 10:03d}" for i in range(1, count + 1)]
-        return result
+        return self.seq_tree.get_data()
 
     def populate_initial_data(self):
         if self.edit_mode and self.existing_meta:
-            # Active modules
             active_mods = self.existing_meta.get("active_modules", [])
             for mod_id, cb in self.module_checkboxes.items():
                 cb.setChecked(mod_id in active_mods)
 
-            # Settings
             settings = self.existing_meta.get("project_settings", {})
             fps_val = str(settings.get("fps", "24.0"))
             idx = self.fps_combo.findText(fps_val)
             if idx >= 0:
                 self.fps_combo.setCurrentIndex(idx)
 
-            # Resolution
             res_str = settings.get("resolution", "1920x1080")
             matched_preset = False
             for i, (label, w, h) in enumerate(self.res_presets[:-1]):
@@ -315,13 +518,25 @@ class ProjectDialog(QDialog):
                 except Exception:
                     pass
 
-            # Existing sequences
+            # Restore Review settings
+            rev_res = settings.get("review_resolution", "Same as Project (100%)")
+            idx_rr = self.review_res_combo.findText(rev_res)
+            if idx_rr >= 0:
+                self.review_res_combo.setCurrentIndex(idx_rr)
+
+            rev_codec = settings.get("review_codec", "Apple ProRes 422")
+            rev_fmt = settings.get("review_format", "mov")
+            target_text = f"{rev_fmt.upper()} - {rev_codec}"
+            for i in range(self.review_format_combo.count()):
+                if rev_codec.lower() in self.review_format_combo.itemText(i).lower():
+                    self.review_format_combo.setCurrentIndex(i)
+                    break
+
             seqs = self.existing_meta.get("sequences", {})
             for s_name, shots in seqs.items():
-                self.add_sequence_row(s_name, len(shots))
+                self.seq_tree.add_sequence(s_name, shots)
         else:
-            # Add default 1 sequence with 3 shots
-            self.add_sequence_row("sq010", 3)
+            self.seq_tree.add_sequence("sq010", ["sh010", "sh020", "sh030"])
 
     def get_active_modules(self) -> List[str]:
         return [mod_id for mod_id, cb in self.module_checkboxes.items() if cb.isChecked()]
@@ -330,7 +545,6 @@ class ProjectDialog(QDialog):
         fps_text = self.fps_combo.currentText()
         color_text = self.color_combo.currentText()
 
-        # Resolution
         width = self.width_spin.value()
         height = self.height_spin.value()
         res_str = f"{width}x{height}"
@@ -342,13 +556,28 @@ class ProjectDialog(QDialog):
         else:
             res_name = f"Custom_{res_str}"
 
-        # Color
         if "ACES 1.2" in color_text:
             mgmt, ocio, space = "OCIO", "aces_1.2", "ACES - ACEScg"
         elif "ACES 1.3" in color_text:
             mgmt, ocio, space = "OCIO", "aces_1.3", "ACES - ACEScg"
         else:
             mgmt, ocio, space = "Nuke", "nuke-default", "linear"
+
+        # Review settings
+        rev_res = self.review_res_combo.currentText()
+        rev_fmt_choice = self.review_format_combo.currentText()
+        if "MP4" in rev_fmt_choice:
+            review_format = "mp4"
+            review_codec = "H.264"
+        elif "Proxy" in rev_fmt_choice:
+            review_format = "mov"
+            review_codec = "Apple ProRes 422 Proxy"
+        elif "H.264" in rev_fmt_choice:
+            review_format = "mov"
+            review_codec = "H.264"
+        else:
+            review_format = "mov"
+            review_codec = "Apple ProRes 422"
 
         return {
             "fps": float(fps_text),
@@ -357,8 +586,11 @@ class ProjectDialog(QDialog):
             "color_management": mgmt,
             "ocio_config": ocio,
             "working_space": space,
-            "frame_start": 1001,  # Default starter frame range (can be inferred from plate later)
-            "frame_end": 1100
+            "frame_start": 1001,
+            "frame_end": 1100,
+            "review_resolution": rev_res,
+            "review_format": review_format,
+            "review_codec": review_codec
         }
 
     def update_preview(self):
@@ -370,7 +602,6 @@ class ProjectDialog(QDialog):
 
         paths = self.pm.build_project_tree_preview(prj_code, active_mods, sequences)
 
-        # Root Item
         root_item = QTreeWidgetItem([f"{prj_code}/"])
         root_item.setExpanded(True)
         self.tree_widget.addTopLevelItem(root_item)

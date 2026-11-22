@@ -20,8 +20,9 @@ from PySide6.QtWidgets import (
 from ..core.pipeline import PipelineManager
 from ..version import __version__, __app_name__
 from .create_dialog import ProjectDialog
-from .template_dialog import TemplateDialog
+from .settings_dialog import SettingsDialog
 from .project_manager_window import ProjectManagerWindow
+from .theme import get_app_icon, get_app_icon_pixmap
 
 
 def get_config_file() -> Path:
@@ -37,6 +38,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"{__app_name__} - v{__version__}")
+        self.setWindowIcon(get_app_icon())
         self.resize(1050, 650)
         self.setMinimumSize(850, 500)
 
@@ -63,6 +65,18 @@ class MainWindow(QMainWindow):
         main_layout = QVBoxLayout(central_widget)
         main_layout.setSpacing(12)
         main_layout.setContentsMargins(16, 16, 16, 16)
+
+        # Brand Header with Logo
+        brand_bar = QHBoxLayout()
+        brand_bar.setSpacing(8)
+        logo_lbl = QLabel()
+        logo_lbl.setPixmap(get_app_icon_pixmap(24))
+        brand_bar.addWidget(logo_lbl)
+        app_name_lbl = QLabel(f"<b>{__app_name__}</b> <span style='color: #4da6ff; font-size: 11px;'>v{__version__}</span>")
+        app_name_lbl.setStyleSheet("font-size: 14px; color: #ffffff;")
+        brand_bar.addWidget(app_name_lbl)
+        brand_bar.addStretch()
+        main_layout.addLayout(brand_bar)
 
         # 1. Top Bar: Root directory selection
         top_bar = QHBoxLayout()
@@ -102,7 +116,7 @@ class MainWindow(QMainWindow):
         btn_new.clicked.connect(self.open_create_dialog)
         actions_bar.addWidget(btn_new)
 
-        self.btn_edit = QPushButton("✎ Modify Structure")
+        self.btn_edit = QPushButton("Modify Project")
         self.btn_edit.clicked.connect(self.open_edit_dialog)
         actions_bar.addWidget(self.btn_edit)
 
@@ -110,9 +124,9 @@ class MainWindow(QMainWindow):
         self.btn_open_proj.clicked.connect(self.open_selected_in_explorer)
         actions_bar.addWidget(self.btn_open_proj)
 
-        btn_template = QPushButton("⚙ Pipeline Manual")
-        btn_template.clicked.connect(self.open_template_dialog)
-        actions_bar.addWidget(btn_template)
+        btn_settings = QPushButton("⚙ Settings")
+        btn_settings.clicked.connect(self.open_settings_dialog)
+        actions_bar.addWidget(btn_settings)
 
         btn_refresh = QPushButton("↻ Refresh")
         btn_refresh.clicked.connect(self.refresh_projects)
@@ -257,6 +271,32 @@ class MainWindow(QMainWindow):
         dialog.project_created.connect(lambda: self.refresh_projects())
         dialog.exec()
 
+    def prompt_unregistered_project(self, proj: Dict[str, Any]) -> bool:
+        """Displays a clear, reassuring non-destructive explanation for unregistered projects."""
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Project Registration Notice")
+        msg_box.setIcon(QMessageBox.Information)
+        msg_box.setText(
+            f"<b style='font-size: 14px; color: #4da6ff;'>Project '{proj['name']}' is not yet initialized with pipeline metadata.</b>"
+        )
+        msg_box.setInformativeText(
+            "<p>This folder exists on disk but has not been configured with studio pipeline metadata.</p>"
+            "<p><b>What happens if you proceed?</b></p>"
+            "<ul>"
+            "<li><b>100% Non-Destructive:</b> None of your existing files, media, or directories will ever be deleted or overwritten.</li>"
+            "<li><b>Structure Verification:</b> Standard post-production directories (such as <code>sequences</code>, <code>editorial</code>, <code>assets</code>) can be verified and missing folders created.</li>"
+            "<li><b>Pipeline Enablement:</b> A lightweight metadata file (<code>_pipeline/project_meta.json</code>) will be created, unlocking the Studio Manager, shot tracking, review player, and Nuke batch rendering.</li>"
+            "</ul>"
+            "<p>Would you like to configure and register this project now?</p>"
+        )
+        msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg_box.setDefaultButton(QMessageBox.Yes)
+
+        if msg_box.exec() == QMessageBox.Yes:
+            self.open_edit_dialog()
+            return True
+        return False
+
     def on_table_double_clicked(self, item: QTableWidgetItem):
         proj = self.get_selected_project()
         if not proj:
@@ -264,7 +304,7 @@ class MainWindow(QMainWindow):
         if proj.get("is_registered"):
             self.open_studio_manager()
         else:
-            self.open_selected_in_explorer()
+            self.prompt_unregistered_project(proj)
 
     def open_studio_manager(self):
         proj = self.get_selected_project()
@@ -273,15 +313,7 @@ class MainWindow(QMainWindow):
             return
 
         if not proj.get("is_registered"):
-            reply = QMessageBox.question(
-                self,
-                "Unregistered Project",
-                f"Project '{proj['name']}' has not been initialized with pipeline metadata.\n"
-                "Would you like to configure and register it now?",
-                QMessageBox.Yes | QMessageBox.No
-            )
-            if reply == QMessageBox.Yes:
-                self.open_edit_dialog()
+            self.prompt_unregistered_project(proj)
             return
 
         proj_path = Path(proj["path"])
@@ -306,8 +338,8 @@ class MainWindow(QMainWindow):
         dialog.project_created.connect(lambda: self.refresh_projects())
         dialog.exec()
 
-    def open_template_dialog(self):
-        dialog = TemplateDialog(pipeline_manager=self.pm, parent=self)
+    def open_settings_dialog(self):
+        dialog = SettingsDialog(pipeline_manager=self.pm, parent=self)
         dialog.exec()
 
     def open_selected_in_explorer(self):

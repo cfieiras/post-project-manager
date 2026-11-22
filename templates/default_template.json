@@ -8,7 +8,10 @@
     "ocio_config": "aces_1.2",
     "working_space": "ACES - ACEScg",
     "frame_start": 1001,
-    "frame_end": 1100
+    "frame_end": 1100,
+    "review_resolution": "Same as Project",
+    "review_format": "mov",
+    "review_codec": "Apple ProRes 422"
   },
   "core_folders": [
     "incoming",
@@ -23,8 +26,8 @@
   ],
   "shot_core": [
     "plates/v001/proxies",
-    "renders/hires/v001",
-    "renders/review"
+    "renders/v001/hires",
+    "renders/v001/review"
   ],
   "modules": {
     "comp": {

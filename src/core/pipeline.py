@@ -212,6 +212,9 @@ class PipelineManager:
                 working_space = project_settings.get("working_space", "ACES - ACEScg")
                 frame_start = int(project_settings.get("frame_start", 1001))
                 frame_end = int(project_settings.get("frame_end", 1100))
+                review_resolution = project_settings.get("review_resolution", "Same as Project")
+                review_format = project_settings.get("review_format", "mov")
+                review_codec = project_settings.get("review_codec", "Apple ProRes 422")
 
                 for seq_name, shot_list in sequences.items():
                     for shot_name in shot_list:
@@ -228,7 +231,10 @@ class PipelineManager:
                             ocio_config=ocio_config,
                             working_space=working_space,
                             frame_start=frame_start,
-                            frame_end=frame_end
+                            frame_end=frame_end,
+                            review_resolution=review_resolution,
+                            review_format=review_format,
+                            review_codec=review_codec
                         )
                         nk_path = project_path / "sequences" / seq_name / shot_name / "comp" / "scripts" / f"{project_code.lower()}_{full_shot_id}_comp_v001.nk"
                         nk_path.parent.mkdir(parents=True, exist_ok=True)
@@ -305,6 +311,9 @@ class PipelineManager:
                 working_space = project_settings.get("working_space", "ACES - ACEScg")
                 frame_start = int(project_settings.get("frame_start", 1001))
                 frame_end = int(project_settings.get("frame_end", 1100))
+                review_resolution = project_settings.get("review_resolution", "Same as Project")
+                review_format = project_settings.get("review_format", "mov")
+                review_codec = project_settings.get("review_codec", "Apple ProRes 422")
 
                 for seq_name, shot_list in sequences.items():
                     for shot_name in shot_list:
@@ -323,20 +332,32 @@ class PipelineManager:
                                 ocio_config=ocio_config,
                                 working_space=working_space,
                                 frame_start=frame_start,
-                                frame_end=frame_end
+                                frame_end=frame_end,
+                                review_resolution=review_resolution,
+                                review_format=review_format,
+                                review_codec=review_codec
                             )
                             nk_path.parent.mkdir(parents=True, exist_ok=True)
                             nk_path.write_text(nk_content, encoding="utf-8")
 
-            # 4. Save updated metadata
-            meta = {
-                "project_code": project_code,
-                "created_at": datetime.now().isoformat(),
-                "last_modified": datetime.now().isoformat(),
-                "active_modules": active_modules,
-                "project_settings": project_settings,
-                "sequences": sequences
-            }
+            # 4. Save updated metadata (preserving existing fields such as delivery_dir)
+            existing_meta = {}
+            if meta_file.exists():
+                try:
+                    with open(meta_file, "r", encoding="utf-8") as f:
+                        existing_meta = json.load(f)
+                except Exception:
+                    existing_meta = {}
+
+            meta = dict(existing_meta)
+            meta["project_code"] = project_code
+            if "created_at" not in meta:
+                meta["created_at"] = datetime.now().isoformat()
+            meta["last_modified"] = datetime.now().isoformat()
+            meta["active_modules"] = active_modules
+            meta["project_settings"] = project_settings
+            meta["sequences"] = sequences
+
             with open(meta_file, "w", encoding="utf-8") as f:
                 json.dump(meta, f, indent=2, ensure_ascii=False)
 
@@ -357,7 +378,10 @@ class PipelineManager:
                 "ocio_config": "aces_1.2",
                 "working_space": "ACES - ACEScg",
                 "frame_start": 1001,
-                "frame_end": 1100
+                "frame_end": 1100,
+                "review_resolution": "Same as Project",
+                "review_format": "mov",
+                "review_codec": "Apple ProRes 422"
             },
             "core_folders": [
                 "incoming",
@@ -372,8 +396,8 @@ class PipelineManager:
             ],
             "shot_core": [
                 "plates/v001/proxies",
-                "renders/hires/v001",
-                "renders/review"
+                "renders/v001/hires",
+                "renders/v001/review"
             ],
             "modules": {
                 "comp": {

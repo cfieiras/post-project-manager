@@ -25,7 +25,9 @@ echo.
 echo Running PyInstaller...
 pyinstaller --noconsole --onefile ^
     --name "PostProjectManager_v!ver!" ^
-    --add-data "templates/default_template.json;templates" ^
+    --icon "src\ui\icons\app_icon.ico" ^
+    --add-data "templates\default_template.json;templates" ^
+    --add-data "src\ui\icons;src\ui\icons" ^
     --clean ^
     src\main.py
 
